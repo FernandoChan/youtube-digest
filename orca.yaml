@@ -1,0 +1,5 @@
+# Orca Worktree 自动化配置（零外部 npm 依赖 Chrome 扩展）
+scripts:
+  setup: |
+    node -v
+setupAgentStartupPolicy: start-immediately
