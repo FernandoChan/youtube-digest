@@ -15,9 +15,14 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(packageJson.version, manifest.version);
   assert.equal(manifest.options_ui.page, "options.html");
   assert.ok(!manifest.permissions.includes("activeTab"));
-  assert.ok(manifest.host_permissions.includes("https://api.deepseek.com/*"));
+  assert.ok(manifest.host_permissions.includes("https://tokenrouter.cheap/*"));
+  assert.ok(
+    manifest.host_permissions.includes(
+      "https://generativelanguage.googleapis.com/*",
+    ),
+  );
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.2.0");
+  assert.equal(manifest.version, "1.3.0");
 });
 
 test("release copy documents current scope without em dashes", () => {
@@ -94,28 +99,9 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(readme, /supadata\.ai\/pricing/i);
   assert.match(readme, /docs\.supadata\.ai\/get-transcript/i);
   assert.match(readme, /dash\.supadata\.ai\/auth\/sign-up/i);
-  assert.match(readme, /platform\.deepseek\.com\/api_keys/i);
-  assert.match(readme, /api-docs\.deepseek\.com/i);
-  assert.match(readme, /api-docs\.deepseek\.com\/quick_start\/pricing/i);
-  assert.match(readme, /\$0\.007[\s\S]*\$0\.014/);
-  assert.match(readme, /\$0\.22[\s\S]*\$0\.44/);
-  assert.match(readme, /\$0\.66[\s\S]*\$1\.32/);
-  assert.match(readme, /01:00–04:00[\s\S]*06:00–10:00 UTC/);
-  assert.match(readme, /20-minute English talk/i);
-  assert.match(readme, /32,600 input tokens/i);
-  assert.match(readme, /\$0\.003[^\n]*\$0\.010 USD/i);
-  assert.match(readme, /\$0\.005[^\n]*\$0\.020 USD/i);
-  assert.match(chineseReadme, /api-docs\.deepseek\.com\/quick_start\/pricing/i);
-  assert.match(chineseReadme, /\$0\.007[\s\S]*\$0\.014/);
-  assert.match(chineseReadme, /\$0\.22[\s\S]*\$0\.44/);
-  assert.match(chineseReadme, /\$0\.66[\s\S]*\$1\.32/);
-  assert.match(chineseReadme, /UTC 01:00–04:00[\s\S]*06:00–10:00/);
-  assert.match(chineseReadme, /20 \u5206\u949f\u82f1\u6587\u89c6\u9891/);
-  assert.match(chineseReadme, /32,600 \u4e2a\u8f93\u5165 token/);
-  assert.match(chineseReadme, /\$0\.003[^\n]*\$0\.010 USD/);
-  assert.match(chineseReadme, /\$0\.005[^\n]*\$0\.020 USD/);
+  assert.match(readme, /tokenrouter\.cheap\/dashboard/i);
   assert.match(chineseReadme, /dash\.supadata\.ai\/auth\/sign-up/i);
-  assert.match(chineseReadme, /platform\.deepseek\.com\/api_keys/i);
+  assert.match(chineseReadme, /tokenrouter\.cheap\/dashboard/i);
   assert.match(readme, /^### The Digest button is missing on a YouTube video$/m);
   assert.match(
     chineseReadme,
@@ -126,9 +112,10 @@ test("release copy documents current scope without em dashes", () => {
   const optionsStyles = read("options.css");
   const optionsScript = read("options.js");
   assert.match(optionsPage, /dash\.supadata\.ai\/auth\/sign-up/i);
-  assert.match(optionsPage, /platform\.deepseek\.com\/api_keys/i);
-  assert.doesNotMatch(optionsPage, /<select\b/i);
-  assert.doesNotMatch(optionsPage, /id="(?:provider|aiBaseUrl|aiModel)"/);
+  assert.match(optionsPage, /tokenrouter\.cheap\/dashboard/i);
+  assert.match(optionsPage, /<select id="aiProviderSelect" name="aiProvider">/i);
+  assert.match(optionsPage, /<select id="aiModel" name="aiModel">/i);
+  assert.doesNotMatch(optionsPage, /id="(?:provider|aiBaseUrl)"/);
   const detailsTag = optionsPage.match(
     /<details\b[^>]*class="card customization-card"[^>]*>/,
   );
@@ -183,8 +170,8 @@ test("release copy documents current scope without em dashes", () => {
   assert.doesNotMatch(publishedDocs, /optional custom-origin/i);
   assert.doesNotMatch(publishedDocs, /chosen AI provider/i);
   assert.doesNotMatch(publishedDocs, /configure a different OpenAI-compatible/i);
-  assert.match(readme, /published version supports DeepSeek V4 Flash as its only AI provider/i);
-  assert.match(chineseReadme, /发布版本只支持 DeepSeek V4 Flash/);
+  assert.match(readme, /local TokenRouter build supports TokenRouter/i);
+  assert.match(chineseReadme, /当前本地版本通过 TokenRouter/);
 });
 
 test("product UI contains no emoji or emoji-like pictographs", () => {
@@ -282,7 +269,7 @@ test("runtime has no source-file credential dependency or retired model", () => 
   assert.doesNotMatch(runtime, /\bCONFIG\./);
   assert.doesNotMatch(runtime, /importScripts\(["']config\.js/);
   assert.doesNotMatch(runtime, /\bdeepseek-chat\b/);
-  assert.match(runtime, /deepseek-v4-flash/);
+  assert.match(runtime, /deepseek-v4\.1-flash/);
 });
 
 test("background reconciles side-panel state after navigation commits", () => {
@@ -320,6 +307,7 @@ test("retired Remix and reader files are absent", () => {
 test("published prompt files contain runtime sections", () => {
   const expectedSections = {
     "prompts/analysis.md": ["System prompt", "User prompt"],
+    "prompts/chapters.md": ["System prompt", "User prompt"],
     "prompts/explain.md": ["System prompt", "User prompt"],
     "prompts/note-cleanup.md": ["System prompt", "User prompt"],
     "prompts/translation.md": [

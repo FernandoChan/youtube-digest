@@ -9,7 +9,7 @@ const YTD_OPTIONS = (() => {
       languageGroupLabel: "Interface language",
       heading: "Bring your own API keys",
       lede:
-        "Keys stay in this Chrome profile and are sent only to Supadata and DeepSeek. This open-source extension has no developer server or analytics.",
+        "Keys stay in this Chrome profile and are sent only to Supadata and your chosen AI provider (Google Gemini or TokenRouter). This open-source extension has no developer server or analytics.",
       transcriptProvider: "Transcript provider",
       supadataApiKeyLabel: "Supadata API key",
       supadataHelp: "Used to fetch timestamped YouTube subtitles. ",
@@ -17,15 +17,34 @@ const YTD_OPTIONS = (() => {
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
       aiProvider: "AI provider",
-      providerSummaryLabel: "Supported AI provider",
+      aiProviderSelectLabel: "Provider",
+      providerSummaryLabel: "Active AI provider",
       providerBadge: "Supported in this version",
-      deepseekApiKeyLabel: "DeepSeek API key",
+      googleProviderBadge: "Google AI Studio / Ultra credits",
+      aiModelLabel: "Model",
+      aiModelHelp:
+        "Default is DeepSeek V4.1 Flash (fast and low cost). You can switch models at any time.",
+      googleModelHelp:
+        "Default is Gemini 4 Neon (fast frontier quality for visual executive digests). Supports Google AI Ultra monthly API credits claimed in Google AI Studio.",
+      reasoningEffortLabel: "Thinking mode",
+      reasoningEffortHelp:
+        "Controls reasoning depth for thinking models such as Gemini 4 and DeepSeek V4.1 Flash. Overview streams the thinking process live, and prompt prefix caching is automatic.",
+      deepseekApiKeyLabel: "TokenRouter API key",
+      deepseekKeyPlaceholder: "Paste your TokenRouter key",
       deepseekHelp:
-        "YouTube Digest uses DeepSeek V4 Flash for overviews, explanations, translation, and note polishing. ",
-      deepseekLink: "Create a DeepSeek API key",
+        "YouTube Digest uses TokenRouter for overviews, explanations, translation, and note polishing. ",
+      deepseekLink: "Open TokenRouter dashboard",
       deepseekHelpSuffix: ".",
       privacyNote:
-        "When you use AI features, DeepSeek receives the video transcript and relevant video context. Review DeepSeek's terms and pricing before saving.",
+        "When you use AI features, TokenRouter receives the video transcript and relevant video context. Review TokenRouter's terms and pricing before saving.",
+      googleApiKeyLabel: "Google Gemini API key",
+      googleKeyPlaceholder: "Paste your Google AI Studio key (AIza...)",
+      googleHelp:
+        "Claim your Google AI Ultra monthly credits in Google AI Studio, link billing, and paste your Gemini API key here. ",
+      googleLink: "Open Google AI Studio API keys",
+      googleHelpSuffix: ".",
+      googlePrivacyNote:
+        "When you use AI features, Google's Gemini API (generativelanguage.googleapis.com) receives the video transcript and relevant video context directly via the x-goog-api-key header. Review Google's Gemini API terms before saving.",
       saveSettings: "Save settings",
       localRemix: "Local remix",
       customizationTitle: "Want to use another AI model?",
@@ -55,10 +74,11 @@ const YTD_OPTIONS = (() => {
       footer:
         'Read <a href="PRIVACY.md" target="_blank">PRIVACY.md</a> in the repository for the complete data-flow description.',
       migrationWarning:
-        "Custom provider settings were removed safely. Your Supadata key was kept, but the AI key was cleared. Enter a DeepSeek API key to continue.",
+        "Previous provider settings were reset safely. Your Supadata key was kept, but the AI key was cleared. Enter a TokenRouter or Google Gemini API key to continue.",
       saving: "Saving…",
       addSupadataKey: "Add a Supadata API key.",
-      addDeepseekKey: "Add a DeepSeek API key.",
+      addDeepseekKey: "Add a TokenRouter API key.",
+      addGoogleKey: "Add a Google Gemini API key.",
       saved: "Saved. Reopen YouTube Digest to use these settings.",
       saveFailed: "Could not save settings. Please try again.",
       copying: "Copying…",
@@ -79,22 +99,40 @@ const YTD_OPTIONS = (() => {
       languageGroupLabel: "界面语言",
       heading: "使用你自己的 API 密钥",
       lede:
-        "密钥仅保存在当前 Chrome 个人资料中，只会发送给 Supadata 和 DeepSeek。本开源扩展没有开发者服务器，也不使用分析服务。",
+        "密钥仅保存在当前 Chrome 个人资料中，只会发送给 Supadata 和你选择的 AI 服务（Google Gemini 或 TokenRouter）。本开源扩展没有开发者服务器，也不使用分析服务。",
       transcriptProvider: "字幕服务",
       supadataApiKeyLabel: "Supadata API 密钥",
       supadataHelp: "用于获取带时间戳的 YouTube 字幕。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiProvider: "AI 服务",
-      providerSummaryLabel: "支持的 AI 服务",
+      aiProviderSelectLabel: "服务商",
+      providerSummaryLabel: "当前 AI 服务",
       providerBadge: "当前版本支持",
-      deepseekApiKeyLabel: "DeepSeek API 密钥",
+      googleProviderBadge: "支持 Google AI Ultra 订阅赠送额度",
+      aiModelLabel: "模型",
+      aiModelHelp: "默认使用 DeepSeek V4.1 Flash（速度快、成本低），可随时切换。",
+      googleModelHelp:
+        "默认使用 Gemini 4 Neon（适合生成深度视觉纪要画板，速度与质量兼顾）。支持在 Google AI Studio 领取的 Google AI Ultra 每月赠送额度。",
+      reasoningEffortLabel: "思考模式",
+      reasoningEffortHelp:
+        "控制 Gemini 4、DeepSeek V4.1 Flash 等推理模型的思考强度。总结页会实时显示思考过程，服务端前缀缓存与浏览器本地缓存均默认开启。",
+      deepseekApiKeyLabel: "TokenRouter API 密钥",
+      deepseekKeyPlaceholder: "粘贴你的 TokenRouter 密钥",
       deepseekHelp:
-        "YouTube Digest 使用 DeepSeek V4 Flash 生成概览、解释内容、翻译字幕和润色笔记。",
-      deepseekLink: "创建 DeepSeek API 密钥",
+        "YouTube Digest 使用 TokenRouter 生成深度纪要、时间线章节、内容讲解、翻译字幕和润色笔记。",
+      deepseekLink: "打开 TokenRouter 控制台",
       deepseekHelpSuffix: "。",
       privacyNote:
-        "使用 AI 功能时，DeepSeek 会收到视频字幕及相关视频上下文。保存前请查看 DeepSeek 的服务条款和价格。",
+        "使用 AI 功能时，TokenRouter 会收到视频字幕及相关视频上下文。保存前请查看 TokenRouter 的服务条款和价格。",
+      googleApiKeyLabel: "Google Gemini API 密钥",
+      googleKeyPlaceholder: "粘贴你的 Google AI Studio 密钥 (AIza...)",
+      googleHelp:
+        "在 Google AI Studio 领取 Google AI Ultra 订阅赠送的每月 API 额度后，创建 Gemini API Key 并粘贴到这里。",
+      googleLink: "打开 Google AI Studio API Keys",
+      googleHelpSuffix: "。",
+      googlePrivacyNote:
+        "使用 AI 功能时，扩展会通过 x-goog-api-key 请求头直连 Google Gemini API (generativelanguage.googleapis.com) 并发送视频字幕及相关上下文。保存前请查看 Google Gemini API 服务条款。",
       saveSettings: "保存设置",
       localRemix: "本地改造",
       customizationTitle: "想使用其他 AI 模型？",
@@ -123,10 +161,11 @@ const YTD_OPTIONS = (() => {
       footer:
         '完整数据流说明请参阅仓库中的 <a href="PRIVACY.md" target="_blank">PRIVACY.md</a>。',
       migrationWarning:
-        "已安全移除自定义服务设置。Supadata 密钥已保留，AI 密钥已清除。请输入 DeepSeek API 密钥以继续使用。",
+        "已安全重置旧的服务设置。Supadata 密钥已保留，AI 密钥已清除。请输入 TokenRouter 或 Google Gemini API 密钥以继续使用。",
       saving: "正在保存…",
       addSupadataKey: "请添加 Supadata API 密钥。",
-      addDeepseekKey: "请添加 DeepSeek API 密钥。",
+      addDeepseekKey: "请添加 TokenRouter API 密钥。",
+      addGoogleKey: "请添加 Google Gemini API 密钥。",
       saved: "已保存。请重新打开 YouTube Digest 以使用这些设置。",
       saveFailed: "无法保存设置，请重试。",
       copying: "正在复制…",
@@ -348,8 +387,19 @@ const YTD_OPTIONS = (() => {
       getSafeLocalStorage(root),
     );
     const form = doc.getElementById("settingsForm");
+    const aiProviderSelect = doc.getElementById("aiProviderSelect");
+    const aiModelSelect = doc.getElementById("aiModel");
+    const reasoningEffortSelect = doc.getElementById("reasoningEffort");
     const aiApiKeyInput = doc.getElementById("aiApiKey");
     const supadataApiKeyInput = doc.getElementById("supadataApiKey");
+    const providerSummaryName = doc.getElementById("providerSummaryName");
+    const providerSummaryBadge = doc.getElementById("providerSummaryBadge");
+    const aiModelHelp = doc.getElementById("aiModelHelp");
+    const aiApiKeyLabel = doc.getElementById("aiApiKeyLabel");
+    const aiKeyHelpPrefix = doc.getElementById("aiKeyHelpPrefix");
+    const aiKeyHelpLink = doc.getElementById("aiKeyHelpLink");
+    const aiKeyHelpSuffix = doc.getElementById("aiKeyHelpSuffix");
+    const aiPrivacyNote = doc.getElementById("aiPrivacyNote");
     const customizationPrompt = doc.getElementById("customizationPrompt");
     const copyCustomizationPromptBtn = doc.getElementById(
       "copyCustomizationPromptBtn",
@@ -361,6 +411,15 @@ const YTD_OPTIONS = (() => {
     const statusStates = new Map();
     const promptDrafts = createPromptDrafts();
     let currentLanguage = "en";
+    let currentProvider = settingsApi.DEFAULTS.provider;
+    const providerKeys = {
+      tokenrouter: "",
+      google: "",
+    };
+    const providerModels = {
+      tokenrouter: settingsApi.PROVIDERS.tokenrouter.defaultModel,
+      google: settingsApi.PROVIDERS.google.defaultModel,
+    };
 
     function renderStatus(element) {
       const state = statusStates.get(element);
@@ -372,6 +431,96 @@ const YTD_OPTIONS = (() => {
     function setStatus(element, key, params = {}) {
       statusStates.set(element, { key, params });
       renderStatus(element);
+    }
+
+    function populateModelOptions(provider, selectedModel) {
+      if (!aiModelSelect) return;
+      const models = settingsApi.getModelsForProvider(provider);
+      const defaultModel = settingsApi.getProviderConfig(provider).defaultModel;
+      aiModelSelect.innerHTML = "";
+      for (const item of models) {
+        const opt = doc.createElement("option");
+        opt.value = item.id;
+        opt.textContent = `${item.label} (${item.id})`;
+        aiModelSelect.appendChild(opt);
+      }
+      const hasSelected = models.some((item) => item.id === selectedModel);
+      aiModelSelect.value = hasSelected ? selectedModel : defaultModel;
+    }
+
+    function renderProviderCopy() {
+      const isGoogle = currentProvider === "google";
+      const providerConfig = settingsApi.getProviderConfig(currentProvider);
+      if (providerSummaryName) {
+        providerSummaryName.textContent = providerConfig.label;
+      }
+      if (providerSummaryBadge) {
+        providerSummaryBadge.textContent = translate(
+          currentLanguage,
+          isGoogle ? "googleProviderBadge" : "providerBadge",
+        );
+      }
+      if (aiModelHelp) {
+        aiModelHelp.textContent = translate(
+          currentLanguage,
+          isGoogle ? "googleModelHelp" : "aiModelHelp",
+        );
+      }
+      if (aiApiKeyLabel) {
+        aiApiKeyLabel.textContent = translate(
+          currentLanguage,
+          isGoogle ? "googleApiKeyLabel" : "deepseekApiKeyLabel",
+        );
+      }
+      if (aiApiKeyInput) {
+        aiApiKeyInput.placeholder = translate(
+          currentLanguage,
+          isGoogle ? "googleKeyPlaceholder" : "deepseekKeyPlaceholder",
+        );
+      }
+      if (aiKeyHelpPrefix) {
+        aiKeyHelpPrefix.textContent = translate(
+          currentLanguage,
+          isGoogle ? "googleHelp" : "deepseekHelp",
+        );
+      }
+      if (aiKeyHelpLink) {
+        aiKeyHelpLink.href = isGoogle
+          ? "https://aistudio.google.com/apikey"
+          : "https://tokenrouter.cheap/dashboard";
+        aiKeyHelpLink.textContent = translate(
+          currentLanguage,
+          isGoogle ? "googleLink" : "deepseekLink",
+        );
+      }
+      if (aiKeyHelpSuffix) {
+        aiKeyHelpSuffix.textContent = translate(
+          currentLanguage,
+          isGoogle ? "googleHelpSuffix" : "deepseekHelpSuffix",
+        );
+      }
+      if (aiPrivacyNote) {
+        aiPrivacyNote.textContent = translate(
+          currentLanguage,
+          isGoogle ? "googlePrivacyNote" : "privacyNote",
+        );
+      }
+    }
+
+    function switchProvider(nextProvider, { preserveCurrentInputs = true } = {}) {
+      if (preserveCurrentInputs) {
+        providerKeys[currentProvider] = aiApiKeyInput?.value || "";
+        if (aiModelSelect?.value) {
+          providerModels[currentProvider] = aiModelSelect.value;
+        }
+      }
+      currentProvider = settingsApi.normalizeProvider(nextProvider);
+      if (aiProviderSelect) aiProviderSelect.value = currentProvider;
+      populateModelOptions(currentProvider, providerModels[currentProvider]);
+      if (aiApiKeyInput) {
+        aiApiKeyInput.value = providerKeys[currentProvider] || "";
+      }
+      renderProviderCopy();
     }
 
     function applyLanguage(language) {
@@ -404,6 +553,7 @@ const YTD_OPTIONS = (() => {
         );
       }
 
+      renderProviderCopy();
       updateLocalizedPrompt(
         customizationPrompt,
         nextDraft.prompt,
@@ -420,8 +570,21 @@ const YTD_OPTIONS = (() => {
         );
         const settings = migration.settings;
 
-        aiApiKeyInput.value = settings.aiApiKey;
+        providerKeys.tokenrouter = settings.tokenrouterApiKey || "";
+        providerKeys.google = settings.googleApiKey || "";
+        providerModels[settings.provider] = settings.aiModel;
         supadataApiKeyInput.value = settings.supadataApiKey;
+
+        switchProvider(settings.provider, { preserveCurrentInputs: false });
+
+        if (reasoningEffortSelect) {
+          const hasEffortOption = [...reasoningEffortSelect.options].some(
+            (opt) => opt.value === settings.reasoningEffort,
+          );
+          reasoningEffortSelect.value = hasEffortOption
+            ? settings.reasoningEffort
+            : settingsApi.DEFAULTS.reasoningEffort;
+        }
         if (migration.migrated) {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
           setStatus(saveStatus, "migrationWarning");
@@ -444,8 +607,18 @@ const YTD_OPTIONS = (() => {
       event.preventDefault();
       setStatus(saveStatus, "saving");
 
+      const activeProvider = settingsApi.normalizeProvider(
+        aiProviderSelect?.value || currentProvider,
+      );
+      providerKeys[activeProvider] = aiApiKeyInput.value;
+
       const settings = settingsApi.normalize({
+        provider: activeProvider,
+        aiModel: aiModelSelect?.value,
+        reasoningEffort: reasoningEffortSelect?.value,
         aiApiKey: aiApiKeyInput.value,
+        tokenrouterApiKey: providerKeys.tokenrouter,
+        googleApiKey: providerKeys.google,
         supadataApiKey: supadataApiKeyInput.value,
       });
 
@@ -454,7 +627,10 @@ const YTD_OPTIONS = (() => {
         return;
       }
       if (!settings.aiApiKey) {
-        setStatus(saveStatus, "addDeepseekKey");
+        setStatus(
+          saveStatus,
+          activeProvider === "google" ? "addGoogleKey" : "addDeepseekKey",
+        );
         return;
       }
 
@@ -503,6 +679,9 @@ const YTD_OPTIONS = (() => {
       setStatus(dataStatus, "allDataDeleted");
     }
 
+    aiProviderSelect?.addEventListener("change", () => {
+      switchProvider(aiProviderSelect.value, { preserveCurrentInputs: true });
+    });
     form.addEventListener("submit", saveSettings);
     copyCustomizationPromptBtn.addEventListener(
       "click",

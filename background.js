@@ -72,20 +72,554 @@ async function loadPromptSection(fileName, heading, variables = {}) {
   return prompt;
 }
 
+function extractUsageStats(rawUsage, model) {
+  if (!rawUsage || typeof rawUsage !== "object") return null;
+  const promptTokens = Number(rawUsage.prompt_tokens) || 0;
+  const cachedTokens =
+    Number(
+      rawUsage.prompt_tokens_details?.cached_tokens ??
+        rawUsage.prompt_cache_hit_tokens ??
+        0,
+    ) || 0;
+  const completionTokens = Number(rawUsage.completion_tokens) || 0;
+  const reasoningTokens =
+    Number(rawUsage.completion_tokens_details?.reasoning_tokens ?? 0) || 0;
+  return {
+    promptTokens,
+    cachedTokens,
+    completionTokens,
+    reasoningTokens,
+    model: typeof model === "string" ? model : "",
+  };
+}
+
+function extractGeminiUsageStats(usageMetadata, model) {
+  if (!usageMetadata || typeof usageMetadata !== "object") return null;
+  const promptTokens = Number(usageMetadata.promptTokenCount) || 0;
+  const cachedTokens = Number(usageMetadata.cachedContentTokenCount) || 0;
+  const completionTokens = Number(usageMetadata.candidatesTokenCount) || 0;
+  const reasoningTokens = Number(usageMetadata.thoughtsTokenCount) || 0;
+  return {
+    promptTokens,
+    cachedTokens,
+    completionTokens,
+    reasoningTokens,
+    model: typeof model === "string" ? model : "",
+  };
+}
+
+function getProviderDisplayName(provider) {
+  if (provider === "google") return "Google Gemini";
+  if (provider === "deepseek") return "DeepSeek";
+  return "TokenRouter";
+}
+
+function buildGeminiRequestBody({
+  messages,
+  maxTokens,
+  temperature,
+  responseFormat,
+  reasoningEffort,
+  model,
+  omitThinkingConfig = false,
+}) {
+  const systemParts = [];
+  const contents = [];
+  for (const msg of messages || []) {
+    const text = typeof msg?.content === "string" ? msg.content : "";
+    if (!text) continue;
+    if (msg.role === "system") {
+      systemParts.push({ text });
+    } else {
+      contents.push({
+        role: msg.role === "assistant" ? "model" : "user",
+        parts: [{ text }],
+      });
+    }
+  }
+
+  const generationConfig = {};
+  if (Number.isFinite(Number(maxTokens)) && Number(maxTokens) > 0) {
+    generationConfig.maxOutputTokens = Math.floor(Number(maxTokens));
+  }
+  if (responseFormat?.type === "json_object") {
+    generationConfig.responseMimeType = "application/json";
+  }
+
+  const normalizedModel = String(model || "").toLowerCase();
+  const isGemini4 = normalizedModel.startsWith("gemini-4");
+  const isGemini3OrHigher =
+    isGemini4 || normalizedModel.startsWith("gemini-3");
+
+  if (!omitThinkingConfig) {
+    if (
+      reasoningEffort === "low" ||
+      reasoningEffort === "medium" ||
+      reasoningEffort === "high"
+    ) {
+      if (isGemini3OrHigher) {
+        generationConfig.thinkingConfig = {
+          includeThoughts: true,
+          thinkingLevel: reasoningEffort.toUpperCase(),
+        };
+      } else {
+        const budgetMap = { low: 1024, medium: 4096, high: 8192 };
+        generationConfig.thinkingConfig = {
+          includeThoughts: true,
+          thinkingBudget: budgetMap[reasoningEffort],
+        };
+      }
+    } else if (reasoningEffort === "off") {
+      if (isGemini4) {
+        generationConfig.thinkingConfig = {
+          includeThoughts: false,
+          thinkingLevel: "LOW",
+        };
+      } else {
+        generationConfig.thinkingConfig = {
+          thinkingBudget: 0,
+        };
+      }
+    }
+  }
+
+  // Gemini 4 reasoning models prefer default temperature when thinking is active.
+  if (
+    typeof temperature === "number" &&
+    (!isGemini4 || reasoningEffort === "off" || omitThinkingConfig)
+  ) {
+    generationConfig.temperature = temperature;
+  }
+
+  const body = {
+    contents: contents.length ? contents : [{ role: "user", parts: [{ text: "" }] }],
+    generationConfig,
+  };
+  if (systemParts.length) {
+    body.systemInstruction = { parts: systemParts };
+  }
+  return body;
+}
+
+function extractGeminiCandidateParts(
+  payload,
+  { onReasoningChunk, onContentChunk } = {},
+) {
+  let reasoning = "";
+  let content = "";
+  const candidates = Array.isArray(payload?.candidates)
+    ? payload.candidates
+    : [];
+  const parts = Array.isArray(candidates[0]?.content?.parts)
+    ? candidates[0].content.parts
+    : [];
+  for (const part of parts) {
+    if (typeof part?.text !== "string" || !part.text) continue;
+    if (part.thought === true) {
+      reasoning += part.text;
+      if (typeof onReasoningChunk === "function") {
+        onReasoningChunk(part.text);
+      }
+    } else {
+      content += part.text;
+      if (typeof onContentChunk === "function") {
+        onContentChunk(part.text);
+      }
+    }
+  }
+  return {
+    reasoning,
+    content,
+    usageMetadata: payload?.usageMetadata || null,
+  };
+}
+
+async function readBoundedStreamingGeminiResponse(
+  response,
+  onActivity,
+  { onReasoningChunk, onContentChunk } = {},
+) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let responseBytes = 0;
+  let detectedMode = "";
+  let rawJsonText = "";
+  let lineBuffer = "";
+  let reasoningText = "";
+  let contentText = "";
+  let usageMetadata = null;
+
+  const processSseLine = (rawLine) => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(":")) return;
+    if (!line.startsWith("data:")) return;
+    const payloadText = line.slice(5).trim();
+    if (!payloadText || payloadText === "[DONE]") return;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(payloadText);
+    } catch (_error) {
+      return;
+    }
+    const extracted = extractGeminiCandidateParts(parsed, {
+      onReasoningChunk,
+      onContentChunk,
+    });
+    reasoningText += extracted.reasoning;
+    contentText += extracted.content;
+    if (extracted.usageMetadata) {
+      usageMetadata = extracted.usageMetadata;
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    onActivity();
+    const byteLength = value?.byteLength ?? 0;
+    responseBytes += byteLength;
+    if (responseBytes > AI_PROVIDER_MAX_RESPONSE_BYTES) {
+      await reader.cancel?.().catch(() => {});
+      const error = new Error(
+        "Google Gemini response exceeded the 2 MiB limit.",
+      );
+      error.code = "AI_RESPONSE_TOO_LARGE";
+      throw error;
+    }
+    const chunkText = decoder.decode(value, { stream: true });
+    if (!detectedMode) {
+      rawJsonText += chunkText;
+      const trimmed = rawJsonText.trimStart();
+      if (!trimmed) continue;
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        detectedMode = "json";
+        continue;
+      }
+      detectedMode = "sse";
+      lineBuffer = rawJsonText;
+      rawJsonText = "";
+    } else if (detectedMode === "json") {
+      rawJsonText += chunkText;
+      continue;
+    } else {
+      lineBuffer += chunkText;
+    }
+
+    const lines = lineBuffer.split("\n");
+    lineBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      processSseLine(line);
+    }
+  }
+
+  const finalTail = decoder.decode();
+  if (
+    !detectedMode &&
+    (rawJsonText.trimStart().startsWith("{") ||
+      rawJsonText.trimStart().startsWith("["))
+  ) {
+    detectedMode = "json";
+  }
+
+  if (detectedMode === "json") {
+    rawJsonText += finalTail;
+    const parsed = JSON.parse(rawJsonText.trimStart());
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    for (const item of items) {
+      const extracted = extractGeminiCandidateParts(item, {
+        onReasoningChunk,
+        onContentChunk,
+      });
+      reasoningText += extracted.reasoning;
+      contentText += extracted.content;
+      if (extracted.usageMetadata) {
+        usageMetadata = extracted.usageMetadata;
+      }
+    }
+    return { text: contentText, reasoning: reasoningText, usageMetadata };
+  }
+
+  lineBuffer += finalTail;
+  if (lineBuffer.trim()) {
+    processSseLine(lineBuffer);
+  }
+  return { text: contentText, reasoning: reasoningText, usageMetadata };
+}
+
+async function requestGoogleGeminiCompletion({
+  settings,
+  messages,
+  maxTokens,
+  temperature,
+  responseFormat,
+  reasoningEffort,
+  stream = false,
+  onReasoningChunk,
+  onContentChunk,
+}) {
+  const effectiveEffort =
+    reasoningEffort ?? settings.reasoningEffort ?? "low";
+  const url = YTD_SETTINGS.geminiGenerateUrl(settings.aiModel, {
+    stream,
+    baseUrl: settings.aiBaseUrl,
+  });
+
+  const executeAttempt = async (omitThinkingConfig) => {
+    const body = buildGeminiRequestBody({
+      messages,
+      maxTokens,
+      temperature,
+      responseFormat,
+      reasoningEffort: effectiveEffort,
+      model: settings.aiModel,
+      omitThinkingConfig,
+    });
+
+    const controller = new AbortController();
+    let timeoutKind = "";
+    let idleTimeoutId;
+    let hardTimeoutId;
+    const abortForTimeout = (kind) => {
+      if (controller.signal.aborted) return;
+      timeoutKind = kind;
+      controller.abort();
+    };
+    const resetIdleTimeout = () => {
+      clearTimeout(idleTimeoutId);
+      idleTimeoutId = setTimeout(
+        () => abortForTimeout("idle"),
+        AI_PROVIDER_IDLE_TIMEOUT_MS,
+      );
+    };
+
+    hardTimeoutId = setTimeout(
+      () => abortForTimeout("hard"),
+      AI_PROVIDER_HARD_TIMEOUT_MS,
+    );
+    resetIdleTimeout();
+
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": settings.aiApiKey,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      resetIdleTimeout();
+
+      if (!response.ok) {
+        const data = await readBoundedAiResponse(
+          response,
+          resetIdleTimeout,
+        ).catch(() => ({}));
+        const errorData = data && typeof data === "object" ? data : {};
+        const message =
+          errorData.error?.message ||
+          errorData.message ||
+          `Google Gemini error: ${response.status}`;
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
+      }
+
+      let text = "";
+      let reasoning = "";
+      let usageMetadata = null;
+
+      if (stream && response.body?.getReader) {
+        const streamed = await readBoundedStreamingGeminiResponse(
+          response,
+          resetIdleTimeout,
+          { onReasoningChunk, onContentChunk },
+        );
+        text = streamed.text;
+        reasoning = streamed.reasoning;
+        usageMetadata = streamed.usageMetadata;
+      } else {
+        const data = await readBoundedAiResponse(response, resetIdleTimeout);
+        const extracted = extractGeminiCandidateParts(data, {
+          onReasoningChunk,
+          onContentChunk,
+        });
+        text = extracted.content;
+        reasoning = extracted.reasoning;
+        usageMetadata = extracted.usageMetadata;
+      }
+
+      if (typeof text !== "string" || !text.trim()) {
+        const error = new Error("Google Gemini returned an empty response.");
+        error.code = "EMPTY_AI_RESPONSE";
+        throw error;
+      }
+
+      const usage = extractGeminiUsageStats(usageMetadata, settings.aiModel);
+      return { text, reasoning, usage, settings };
+    } catch (error) {
+      if (timeoutKind === "idle") {
+        const timeoutError = new Error(
+          "Google Gemini request was inactive for 50 seconds. Please Retry.",
+        );
+        timeoutError.code = "AI_IDLE_TIMEOUT";
+        throw timeoutError;
+      }
+      if (timeoutKind === "hard") {
+        const timeoutError = new Error(
+          "Google Gemini request exceeded the 120-second limit. Please Retry.",
+        );
+        timeoutError.code = "AI_HARD_TIMEOUT";
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      clearTimeout(idleTimeoutId);
+      clearTimeout(hardTimeoutId);
+    }
+  };
+
+  try {
+    return await executeAttempt(false);
+  } catch (error) {
+    if (
+      error.status === 400 &&
+      /thinking|temperature/i.test(String(error.message || ""))
+    ) {
+      return await executeAttempt(true);
+    }
+    throw error;
+  }
+}
+
+function createThinkTagSplitter(onReasoningChunk, onContentChunk) {
+  let inThink = false;
+  let pending = "";
+
+  const emitReasoning = (chunk) => {
+    if (chunk && typeof onReasoningChunk === "function") {
+      onReasoningChunk(chunk);
+    }
+  };
+  const emitContent = (chunk) => {
+    if (chunk && typeof onContentChunk === "function") {
+      onContentChunk(chunk);
+    }
+  };
+
+  return {
+    push(chunk) {
+      if (!chunk) return { reasoning: "", content: "" };
+      pending += chunk;
+      let reasoning = "";
+      let content = "";
+
+      while (pending.length) {
+        if (!inThink) {
+          const openIdx = pending.indexOf("<think>");
+          if (openIdx === -1) {
+            const partialStart = pending.lastIndexOf("<");
+            if (
+              partialStart !== -1 &&
+              "<think>".startsWith(pending.slice(partialStart))
+            ) {
+              const safe = pending.slice(0, partialStart);
+              pending = pending.slice(partialStart);
+              content += safe;
+              emitContent(safe);
+              break;
+            }
+            content += pending;
+            emitContent(pending);
+            pending = "";
+            break;
+          }
+          const before = pending.slice(0, openIdx);
+          if (before) {
+            content += before;
+            emitContent(before);
+          }
+          pending = pending.slice(openIdx + 7);
+          inThink = true;
+        } else {
+          const closeIdx = pending.indexOf("</think>");
+          if (closeIdx === -1) {
+            const partialStart = pending.lastIndexOf("<");
+            if (
+              partialStart !== -1 &&
+              "</think>".startsWith(pending.slice(partialStart))
+            ) {
+              const safe = pending.slice(0, partialStart);
+              pending = pending.slice(partialStart);
+              reasoning += safe;
+              emitReasoning(safe);
+              break;
+            }
+            reasoning += pending;
+            emitReasoning(pending);
+            pending = "";
+            break;
+          }
+          const inside = pending.slice(0, closeIdx);
+          if (inside) {
+            reasoning += inside;
+            emitReasoning(inside);
+          }
+          pending = pending.slice(closeIdx + 8);
+          inThink = false;
+        }
+      }
+      return { reasoning, content };
+    },
+    flush() {
+      if (!pending) return { reasoning: "", content: "" };
+      const tail = pending;
+      pending = "";
+      if (inThink) {
+        emitReasoning(tail);
+        return { reasoning: tail, content: "" };
+      }
+      emitContent(tail);
+      return { reasoning: "", content: tail };
+    },
+  };
+}
+
 async function requestAiCompletion({
   messages,
   maxTokens,
   temperature,
   responseFormat,
+  reasoningEffort,
+  stream = false,
+  onReasoningChunk,
+  onContentChunk,
 }) {
   const settings = await getSettings();
+  const providerName = getProviderDisplayName(settings.provider);
   if (!settings.aiApiKey) {
     const error = new Error(
-      "DeepSeek API key not configured. Open YouTube Digest Settings.",
+      `${providerName} API key not configured. Open YouTube Digest Settings.`,
     );
     error.code = "NO_AI_KEY";
     throw error;
   }
+  if (settings.provider === "google") {
+    return requestGoogleGeminiCompletion({
+      settings,
+      messages,
+      maxTokens,
+      temperature,
+      responseFormat,
+      reasoningEffort,
+      stream,
+      onReasoningChunk,
+      onContentChunk,
+    });
+  }
+  const effectiveEffort =
+    reasoningEffort ?? settings.reasoningEffort ?? "low";
   const body = {
     model: settings.aiModel,
     max_tokens: maxTokens,
@@ -95,8 +629,27 @@ async function requestAiCompletion({
   if (responseFormat) {
     body.response_format = responseFormat;
   }
-  // Product features need bounded, predictable latency rather than reasoning traces.
-  body.thinking = { type: "disabled" };
+  // Keep DeepSeek-only request fields isolated from TokenRouter multi-model requests.
+  if (settings.provider === "deepseek") {
+    body.thinking = { type: "disabled" };
+  } else if (settings.provider === "tokenrouter") {
+    if (
+      effectiveEffort === "low" ||
+      effectiveEffort === "medium" ||
+      effectiveEffort === "high"
+    ) {
+      body.reasoning_effort = effectiveEffort;
+    } else if (
+      effectiveEffort === "off" &&
+      String(settings.aiModel || "").startsWith("deepseek")
+    ) {
+      body.thinking = { type: "disabled" };
+    }
+  }
+  if (stream) {
+    body.stream = true;
+    body.stream_options = { include_usage: true };
+  }
 
   const controller = new AbortController();
   let timeoutKind = "";
@@ -122,7 +675,7 @@ async function requestAiCompletion({
   resetIdleTimeout();
   try {
     const response = await fetch(
-      YTD_SETTINGS.chatCompletionsUrl(),
+      YTD_SETTINGS.chatCompletionsUrl(settings.aiBaseUrl),
       {
         method: "POST",
         headers: {
@@ -133,41 +686,88 @@ async function requestAiCompletion({
         signal: controller.signal,
       },
     );
-    // Receiving headers proves DeepSeek is still making progress. DeepSeek
-    // may then send blank-line body chunks while a non-streaming request queues.
+    // Receiving headers proves the AI provider is still making progress.
     resetIdleTimeout();
 
-    const data = await readBoundedAiResponse(response, resetIdleTimeout);
     if (!response.ok) {
+      const data = await readBoundedAiResponse(response, resetIdleTimeout).catch(
+        () => ({}),
+      );
       const errorData = data && typeof data === "object" ? data : {};
       const error = new Error(
         errorData.error?.message ||
           errorData.message ||
-          `DeepSeek error: ${response.status}`,
+          `TokenRouter error: ${response.status}`,
       );
       error.status = response.status;
       throw error;
     }
 
-    const text = data.choices?.[0]?.message?.content;
+    let text = "";
+    let reasoning = "";
+    let rawUsage = null;
+
+    if (stream && response.body?.getReader) {
+      const streamed = await readBoundedStreamingAiResponse(
+        response,
+        resetIdleTimeout,
+        { onReasoningChunk, onContentChunk },
+      );
+      text = streamed.text;
+      reasoning = streamed.reasoning;
+      rawUsage = streamed.usage;
+    } else {
+      const data = await readBoundedAiResponse(response, resetIdleTimeout);
+      const message = data.choices?.[0]?.message || {};
+      const rawContent =
+        typeof message.content === "string" ? message.content : "";
+      const explicitReasoning =
+        typeof message.reasoning_content === "string"
+          ? message.reasoning_content
+          : typeof message.reasoning === "string"
+            ? message.reasoning
+            : "";
+      if (explicitReasoning) {
+        reasoning = explicitReasoning;
+        if (typeof onReasoningChunk === "function") {
+          onReasoningChunk(explicitReasoning);
+        }
+        text = rawContent;
+        if (text && typeof onContentChunk === "function") {
+          onContentChunk(text);
+        }
+      } else {
+        const splitter = createThinkTagSplitter(
+          onReasoningChunk,
+          onContentChunk,
+        );
+        const firstPass = splitter.push(rawContent);
+        const tailPass = splitter.flush();
+        reasoning = `${firstPass.reasoning}${tailPass.reasoning}`;
+        text = `${firstPass.content}${tailPass.content}`;
+      }
+      rawUsage = data.usage || null;
+    }
+
     if (typeof text !== "string" || !text.trim()) {
-      const error = new Error("DeepSeek returned an empty response.");
+      const error = new Error("TokenRouter returned an empty response.");
       error.code = "EMPTY_AI_RESPONSE";
       throw error;
     }
 
-    return { text, settings };
+    const usage = extractUsageStats(rawUsage, settings.aiModel);
+    return { text, reasoning, usage, settings };
   } catch (error) {
     if (timeoutKind === "idle") {
       const timeoutError = new Error(
-        "DeepSeek request was inactive for 50 seconds. Please Retry.",
+        "TokenRouter request was inactive for 50 seconds. Please Retry.",
       );
       timeoutError.code = "AI_IDLE_TIMEOUT";
       throw timeoutError;
     }
     if (timeoutKind === "hard") {
       const timeoutError = new Error(
-        "DeepSeek request exceeded the 120-second limit. Please Retry.",
+        "TokenRouter request exceeded the 120-second limit. Please Retry.",
       );
       timeoutError.code = "AI_HARD_TIMEOUT";
       throw timeoutError;
@@ -179,6 +779,152 @@ async function requestAiCompletion({
   }
 }
 
+async function readBoundedStreamingAiResponse(
+  response,
+  onActivity,
+  { onReasoningChunk, onContentChunk } = {},
+) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let responseBytes = 0;
+  let detectedMode = "";
+  let rawJsonText = "";
+  let lineBuffer = "";
+  let reasoningText = "";
+  let contentText = "";
+  let rawUsage = null;
+  const splitter = createThinkTagSplitter(onReasoningChunk, onContentChunk);
+
+  const processSseLine = (rawLine) => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(":")) return;
+    if (!line.startsWith("data:")) return;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") return;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(payload);
+    } catch (_error) {
+      return;
+    }
+    if (parsed.usage) {
+      rawUsage = parsed.usage;
+    }
+    const choice = parsed.choices?.[0];
+    const delta = choice?.delta || choice?.message || {};
+    const reasoningPart =
+      typeof delta.reasoning_content === "string"
+        ? delta.reasoning_content
+        : typeof delta.reasoning === "string"
+          ? delta.reasoning
+          : "";
+    if (reasoningPart) {
+      reasoningText += reasoningPart;
+      if (typeof onReasoningChunk === "function") {
+        onReasoningChunk(reasoningPart);
+      }
+    }
+    const contentPart = typeof delta.content === "string" ? delta.content : "";
+    if (contentPart) {
+      const split = splitter.push(contentPart);
+      reasoningText += split.reasoning;
+      contentText += split.content;
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    onActivity();
+    const byteLength = value?.byteLength ?? 0;
+    responseBytes += byteLength;
+    if (responseBytes > AI_PROVIDER_MAX_RESPONSE_BYTES) {
+      await reader.cancel?.().catch(() => {});
+      const error = new Error("TokenRouter response exceeded the 2 MiB limit.");
+      error.code = "AI_RESPONSE_TOO_LARGE";
+      throw error;
+    }
+    const chunkText = decoder.decode(value, { stream: true });
+    if (!detectedMode) {
+      rawJsonText += chunkText;
+      const trimmed = rawJsonText.trimStart();
+      if (!trimmed) continue;
+      if (trimmed.startsWith("{")) {
+        detectedMode = "json";
+        continue;
+      }
+      detectedMode = "sse";
+      lineBuffer = rawJsonText;
+      rawJsonText = "";
+    } else if (detectedMode === "json") {
+      rawJsonText += chunkText;
+      continue;
+    } else {
+      lineBuffer += chunkText;
+    }
+
+    const lines = lineBuffer.split("\n");
+    lineBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      processSseLine(line);
+    }
+  }
+
+  const finalTail = decoder.decode();
+  if (!detectedMode && rawJsonText.trimStart().startsWith("{")) {
+    detectedMode = "json";
+  }
+
+  if (detectedMode === "json") {
+    rawJsonText += finalTail;
+    const data = JSON.parse(rawJsonText.trimStart());
+    const message = data.choices?.[0]?.message || {};
+    const rawContent =
+      typeof message.content === "string" ? message.content : "";
+    const explicitReasoning =
+      typeof message.reasoning_content === "string"
+        ? message.reasoning_content
+        : typeof message.reasoning === "string"
+          ? message.reasoning
+          : "";
+    if (explicitReasoning) {
+      reasoningText = explicitReasoning;
+      if (typeof onReasoningChunk === "function") {
+        onReasoningChunk(explicitReasoning);
+      }
+      contentText = rawContent;
+      if (contentText && typeof onContentChunk === "function") {
+        onContentChunk(contentText);
+      }
+    } else {
+      const firstPass = splitter.push(rawContent);
+      const tailPass = splitter.flush();
+      reasoningText = `${firstPass.reasoning}${tailPass.reasoning}`;
+      contentText = `${firstPass.content}${tailPass.content}`;
+    }
+    return {
+      text: contentText,
+      reasoning: reasoningText,
+      usage: data.usage || null,
+    };
+  }
+
+  lineBuffer += finalTail;
+  if (lineBuffer.trim()) {
+    processSseLine(lineBuffer);
+  }
+  const tailPass = splitter.flush();
+  reasoningText += tailPass.reasoning;
+  contentText += tailPass.content;
+
+  return {
+    text: contentText,
+    reasoning: reasoningText,
+    usage: rawUsage,
+  };
+}
+
 async function readBoundedAiResponse(response, onActivity) {
   const reader = response.body?.getReader?.();
   if (reader) {
@@ -188,13 +934,13 @@ async function readBoundedAiResponse(response, onActivity) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      // Every received chunk is activity, including DeepSeek's blank lines.
+      // Every received chunk is activity, including keepalive blank lines.
       onActivity();
       const byteLength = value?.byteLength ?? 0;
       responseBytes += byteLength;
       if (responseBytes > AI_PROVIDER_MAX_RESPONSE_BYTES) {
         await reader.cancel?.().catch(() => {});
-        const error = new Error("DeepSeek response exceeded the 2 MiB limit.");
+        const error = new Error("TokenRouter response exceeded the 2 MiB limit.");
         error.code = "AI_RESPONSE_TOO_LARGE";
         throw error;
       }
@@ -211,7 +957,7 @@ async function readBoundedAiResponse(response, onActivity) {
     onActivity();
     const byteLength = new TextEncoder().encode(responseText).byteLength;
     if (byteLength > AI_PROVIDER_MAX_RESPONSE_BYTES) {
-      const error = new Error("DeepSeek response exceeded the 2 MiB limit.");
+      const error = new Error("TokenRouter response exceeded the 2 MiB limit.");
       error.code = "AI_RESPONSE_TOO_LARGE";
       throw error;
     }
@@ -364,6 +1110,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.channelName,
       message.videoDescription,
       message.videoDuration,
+      { requestId: message.requestId, videoId: message.videoId },
+    )
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (message.action === "analyzeChapters") {
+    handleAnalyzeChapters(
+      message.transcriptText,
+      message.videoTitle,
+      message.channelName,
+      message.videoDescription,
+      message.videoDuration,
+      { requestId: message.requestId, videoId: message.videoId },
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
@@ -439,6 +1200,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           hasSupadataKey: !!settings.supadataApiKey,
           hasAiKey: !!settings.aiApiKey,
+          provider: settings.provider,
         }),
       )
       .catch((error) => sendResponse({ error: error.message }));
@@ -868,6 +1630,59 @@ async function pollTranscriptJob(jobId, supadataApiKey) {
  * @param {string} text - The raw text from the model
  * @returns {Object} - The parsed object (throws if still unparseable)
  */
+function repairUnescapedJsonQuotes(text) {
+  // Deterministic repair for an unescaped ASCII double quote inside a JSON
+  // string value (e.g., "the "fast" path"). A quote inside a string is treated
+  // as a string terminator only when the next non-whitespace character is a
+  // valid JSON structural delimiter (:, ,, }, or ]).
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      if (!inString) {
+        inString = true;
+        out += ch;
+        continue;
+      }
+      // Look ahead to the next non-whitespace character
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j])) j += 1;
+      const next = text[j] || "";
+      if (
+        next === ":" ||
+        next === "," ||
+        next === "}" ||
+        next === "]" ||
+        next === ""
+      ) {
+        inString = false;
+        out += ch;
+      } else {
+        out += '\\"';
+      }
+      continue;
+    }
+    if (inString && (ch === "\n" || ch === "\r")) {
+      out += ch === "\n" ? "\\n" : "";
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
 function parseLooseJson(text) {
   let cleaned = (text || "").trim();
 
@@ -885,11 +1700,17 @@ function parseLooseJson(text) {
 
   try {
     return JSON.parse(cleaned);
-  } catch (firstError) {
+  } catch (_firstError) {
     // Most common LLM slip: a trailing comma right before a } or ].
-    // e.g. ["a", "b", ]  ->  ["a", "b" ]
-    const repaired = cleaned.replace(/,(\s*[}\]])/g, "$1");
-    return JSON.parse(repaired);
+    const noTrailing = cleaned.replace(/,(\s*[}\]])/g, "$1");
+    try {
+      return JSON.parse(noTrailing);
+    } catch (_secondError) {
+      // Second common LLM slip: unescaped ASCII double quotes or raw newlines
+      // inside a string value (common in dense quoted transcripts).
+      const repaired = repairUnescapedJsonQuotes(noTrailing);
+      return JSON.parse(repaired);
+    }
   }
 }
 
@@ -908,52 +1729,89 @@ function parseLooseJson(text) {
  * @param {string} channelName - The channel name
  * @returns {Object} - { success, analysis } or { success: false, error }
  */
+function computeTranscriptDurationContext(transcriptText, videoDuration) {
+  let lastTranscriptSeconds = 0;
+  const stampMatches = String(transcriptText || "").match(/\[(\d+):(\d{2})\]/g) || [];
+  if (stampMatches.length) {
+    const last =
+      stampMatches[stampMatches.length - 1].match(/\[(\d+):(\d{2})\]/);
+    lastTranscriptSeconds = parseInt(last[1], 10) * 60 + parseInt(last[2], 10);
+  }
+
+  const effectiveSeconds = Math.max(
+    Math.floor(videoDuration || 0),
+    lastTranscriptSeconds,
+  );
+  const durationMinutes = Math.floor(effectiveSeconds / 60);
+  const durationSeconds = Math.floor(effectiveSeconds % 60);
+  const durationFormatted = `${durationMinutes}:${String(durationSeconds).padStart(2, "0")}`;
+  const lateThresholdSeconds = Math.floor(effectiveSeconds * 0.72);
+  const lateThreshold = `${Math.floor(lateThresholdSeconds / 60)}:${String(
+    lateThresholdSeconds % 60,
+  ).padStart(2, "0")}`;
+
+  return {
+    durationFormatted,
+    maxTimestampSeconds: effectiveSeconds,
+    lateThreshold,
+  };
+}
+
+function mapAiProviderError(error, provider, fallbackMessage) {
+  const providerName = getProviderDisplayName(provider);
+  if (error.status === 401 || error.status === 403) {
+    return {
+      success: false,
+      error: "INVALID_AI_KEY",
+      message:
+        provider === "google"
+          ? "Google Gemini rejected the API key. Check your key and Google AI Studio billing/Ultra credit status."
+          : `${providerName} rejected the API key.`,
+    };
+  }
+  if (error.status === 402) {
+    return {
+      success: false,
+      error: "INSUFFICIENT_BALANCE",
+      message: `${providerName} account balance is insufficient (HTTP 402).`,
+    };
+  }
+  if (error.status === 429) {
+    return {
+      success: false,
+      error: "RATE_LIMITED",
+      message: `${providerName} rate-limited this request. Try again shortly.`,
+    };
+  }
+  return {
+    success: false,
+    error: error.message || fallbackMessage,
+  };
+}
+
 async function handleAnalyzeTranscript(
   transcriptText,
   videoTitle,
   channelName,
   videoDescription,
   videoDuration,
+  meta = {},
 ) {
+  let provider = "tokenrouter";
   try {
     const settings = await getSettings();
+    provider = settings.provider;
     if (!settings.aiApiKey) {
+      const providerName = getProviderDisplayName(provider);
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "DeepSeek API key not configured. Open YouTube Digest Settings.",
+        message: `${providerName} API key not configured. Open YouTube Digest Settings.`,
       };
     }
 
-    // Convert duration to MM:SS format for context
-    // The transcript text is already prefixed with [M:SS] markers. Its LAST
-    // marker is the most reliable signal of where the content actually ends —
-    // more trustworthy than the duration metadata, which is sometimes missing
-    // or wrong. We use the larger of (metadata duration, last transcript stamp).
-    let lastTranscriptSeconds = 0;
-    const stampMatches = transcriptText.match(/\[(\d+):(\d{2})\]/g) || [];
-    if (stampMatches.length) {
-      const last =
-        stampMatches[stampMatches.length - 1].match(/\[(\d+):(\d{2})\]/);
-      lastTranscriptSeconds = parseInt(last[1]) * 60 + parseInt(last[2]);
-    }
-
-    const effectiveSeconds = Math.max(
-      Math.floor(videoDuration || 0),
-      lastTranscriptSeconds,
-    );
-    const durationMinutes = Math.floor(effectiveSeconds / 60);
-    const durationSeconds = Math.floor(effectiveSeconds % 60);
-    const durationFormatted = `${durationMinutes}:${String(durationSeconds).padStart(2, "0")}`;
-    const maxTimestampSeconds = effectiveSeconds;
-
-    // The "last chapter must be after" threshold (75% in) forces the model to
-    // cover the WHOLE video instead of front-loading chapters near the start.
-    // We do NOT prescribe a chapter count — the model picks the natural splits.
-    const lateThresholdSeconds = Math.floor(effectiveSeconds * 0.75);
-    const lateThreshold = `${Math.floor(lateThresholdSeconds / 60)}:${String(
-      lateThresholdSeconds % 60,
-    ).padStart(2, "0")}`;
+    const { durationFormatted, maxTimestampSeconds, lateThreshold } =
+      computeTranscriptDurationContext(transcriptText, videoDuration);
 
     const promptVariables = {
       durationFormatted,
@@ -976,21 +1834,59 @@ async function handleAnalyzeTranscript(
     );
 
     debugLog("[YouTube Digest] Requesting video analysis", settings.aiModel);
-    const { text: responseText } = await requestAiCompletion({
-      maxTokens: 8192,
+    const requestId =
+      typeof meta?.requestId === "string" ? meta.requestId : "";
+    const videoId = typeof meta?.videoId === "string" ? meta.videoId : "";
+    let hasStartedWriting = false;
+
+    const {
+      text: responseText,
+      reasoning,
+      usage,
+    } = await requestAiCompletion({
+      maxTokens: 16384,
       responseFormat: { type: "json_object" },
+      stream: true,
+      onReasoningChunk: (chunk) => {
+        if (!requestId || !chunk) return;
+        chrome.runtime
+          .sendMessage({
+            action: "analysisProgress",
+            requestId,
+            videoId,
+            target: "overview",
+            phase: "thinking",
+            reasoningDelta: chunk,
+          })
+          .catch(() => {});
+      },
+      onContentChunk: (chunk) => {
+        if (!requestId || hasStartedWriting || !chunk || !chunk.trim()) return;
+        hasStartedWriting = true;
+        chrome.runtime
+          .sendMessage({
+            action: "analysisProgress",
+            requestId,
+            videoId,
+            target: "overview",
+            phase: "writing",
+          })
+          .catch(() => {});
+      },
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
     });
 
-    // Parse the JSON, tolerating trailing commas / stray prose
     let analysis = parseLooseJson(responseText);
-
-    // Treat every model response as untrusted data. Rebuild the supported
-    // schema and derive display timestamps from validated numeric seconds.
     analysis = validateAndFixTimestamps(analysis, maxTimestampSeconds);
+    if (typeof reasoning === "string" && reasoning.trim()) {
+      analysis.reasoning = reasoning.trim();
+    }
+    if (usage) {
+      analysis.usage = usage;
+    }
 
     return {
       success: true,
@@ -998,34 +1894,125 @@ async function handleAnalyzeTranscript(
     };
   } catch (error) {
     console.error("Analysis error:", error);
-    if (error.status === 401) {
+    return mapAiProviderError(error, provider, "Failed to analyze transcript");
+  }
+}
+
+async function handleAnalyzeChapters(
+  transcriptText,
+  videoTitle,
+  channelName,
+  videoDescription,
+  videoDuration,
+  meta = {},
+) {
+  let provider = "tokenrouter";
+  try {
+    const settings = await getSettings();
+    provider = settings.provider;
+    if (!settings.aiApiKey) {
+      const providerName = getProviderDisplayName(provider);
       return {
         success: false,
-        error: "INVALID_AI_KEY",
-        message: "DeepSeek rejected the API key.",
+        error: "NO_AI_KEY",
+        message: `${providerName} API key not configured. Open YouTube Digest Settings.`,
       };
     }
-    if (error.status === 429) {
-      return {
-        success: false,
-        error: "RATE_LIMITED",
-        message: "DeepSeek rate-limited this request. Try again shortly.",
-      };
-    }
-    return {
-      success: false,
-      error: error.message || "Failed to analyze transcript",
+
+    const { durationFormatted, maxTimestampSeconds, lateThreshold } =
+      computeTranscriptDurationContext(transcriptText, videoDuration);
+
+    const promptVariables = {
+      durationFormatted,
+      lateThreshold,
+      maxTimestampSeconds,
+      videoTitle: videoTitle || "Unknown",
+      channelName: channelName || "Unknown",
+      videoDescription: videoDescription || "No description available",
+      transcriptText,
     };
+    const systemPrompt = await loadPromptSection(
+      "chapters.md",
+      "System prompt",
+      promptVariables,
+    );
+    const userPrompt = await loadPromptSection(
+      "chapters.md",
+      "User prompt",
+      promptVariables,
+    );
+
+    debugLog("[YouTube Digest] Requesting timeline chapters", settings.aiModel);
+    const requestId =
+      typeof meta?.requestId === "string" ? meta.requestId : "";
+    const videoId = typeof meta?.videoId === "string" ? meta.videoId : "";
+    let hasStartedWriting = false;
+
+    const {
+      text: responseText,
+      reasoning,
+      usage,
+    } = await requestAiCompletion({
+      maxTokens: 8192,
+      responseFormat: { type: "json_object" },
+      stream: true,
+      onReasoningChunk: (chunk) => {
+        if (!requestId || !chunk) return;
+        chrome.runtime
+          .sendMessage({
+            action: "analysisProgress",
+            requestId,
+            videoId,
+            target: "chapters",
+            phase: "thinking",
+            reasoningDelta: chunk,
+          })
+          .catch(() => {});
+      },
+      onContentChunk: (chunk) => {
+        if (!requestId || hasStartedWriting || !chunk || !chunk.trim()) return;
+        hasStartedWriting = true;
+        chrome.runtime
+          .sendMessage({
+            action: "analysisProgress",
+            requestId,
+            videoId,
+            target: "chapters",
+            phase: "writing",
+          })
+          .catch(() => {});
+      },
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
+
+    const parsed = parseLooseJson(responseText);
+    const validated = validateAndFixTimestamps(parsed, maxTimestampSeconds);
+    return {
+      success: true,
+      chapters: validated.chapters,
+      keyMoments: validated.keyMoments,
+      reasoning:
+        typeof reasoning === "string" && reasoning.trim()
+          ? reasoning.trim()
+          : "",
+      usage: usage || null,
+    };
+  } catch (error) {
+    console.error("Chapters analysis error:", error);
+    return mapAiProviderError(
+      error,
+      provider,
+      "Failed to generate timeline chapters",
+    );
   }
 }
 
 /**
- * Validates all timestamps in the analysis and fixes any that exceed video duration.
- * This is a safety net to prevent hallucinated timestamps from reaching the UI.
- *
- * @param {Object} analysis - The parsed analysis from DeepSeek
- * @param {number} maxSeconds - Maximum valid timestamp in seconds
- * @returns {Object} - Analysis with validated timestamps
+ * Validates all fields and timestamps in the analysis and fixes any that exceed video duration.
+ * Treats every model response as untrusted data and rebuilds the supported schema cleanly.
  */
 function validateAndFixTimestamps(analysis, maxSeconds) {
   const safeMax =
@@ -1033,7 +2020,6 @@ function validateAndFixTimestamps(analysis, maxSeconds) {
       ? Number(maxSeconds)
       : Number.MAX_SAFE_INTEGER;
 
-  // Helper to format seconds as MM:SS
   const formatTimestamp = (seconds) => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
@@ -1042,23 +2028,53 @@ function validateAndFixTimestamps(analysis, maxSeconds) {
 
   const safeString = (value, maxLength) =>
     typeof value === "string" ? value.trim().slice(0, maxLength) : "";
-  const safeSeconds = (value) => {
-    const seconds = Number(value);
+
+  const parseTimestampString = (ts) => {
+    if (typeof ts !== "string") return null;
+    const match = ts.trim().match(/^(\d+):(\d{2})(?::(\d{2}))?$/);
+    if (!match) return null;
+    if (match[3] !== undefined) {
+      return (
+        parseInt(match[1], 10) * 3600 +
+        parseInt(match[2], 10) * 60 +
+        parseInt(match[3], 10)
+      );
+    }
+    return parseInt(match[1], 10) * 60 + parseInt(match[2], 10);
+  };
+
+  const safeSeconds = (value, fallbackTs) => {
+    let seconds = Number(value);
+    if (!Number.isFinite(seconds) && fallbackTs) {
+      const parsed = parseTimestampString(fallbackTs);
+      if (parsed !== null) seconds = parsed;
+    }
     if (!Number.isFinite(seconds) || seconds < 0 || seconds > safeMax) {
       return null;
     }
     return Math.floor(seconds);
   };
 
+  const VALID_TONES = new Set(["terracotta", "sage", "sand", "slate"]);
+  const safeTone = (tone) => {
+    const normalized = safeString(tone, 30).toLowerCase();
+    return VALID_TONES.has(normalized) ? normalized : "sand";
+  };
+
   const chapters = (Array.isArray(analysis?.chapters) ? analysis.chapters : [])
     .slice(0, 100)
     .map((chapter) => {
-      const seconds = safeSeconds(chapter?.timestampSeconds);
+      const seconds = safeSeconds(chapter?.timestampSeconds, chapter?.timestamp);
       const title = safeString(chapter?.title, 300);
       if (seconds === null || !title) return null;
+      const importance =
+        safeString(chapter?.importance, 20).toLowerCase() === "supporting"
+          ? "supporting"
+          : "core";
       return {
         title,
         summary: safeString(chapter?.summary, 1500),
+        importance,
         timestampSeconds: seconds,
         timestamp: formatTimestamp(seconds),
       };
@@ -1071,11 +2087,12 @@ function validateAndFixTimestamps(analysis, maxSeconds) {
   )
     .slice(0, 50)
     .map((quote) => {
-      const seconds = safeSeconds(quote?.timestampSeconds);
+      const seconds = safeSeconds(quote?.timestampSeconds, quote?.timestamp);
       const text = safeString(quote?.quote, 3000);
       if (seconds === null || !text) return null;
       return {
         quote: text,
+        speaker: safeString(quote?.speaker, 120),
         timestampSeconds: seconds,
         timestamp: formatTimestamp(seconds),
       };
@@ -1083,14 +2100,203 @@ function validateAndFixTimestamps(analysis, maxSeconds) {
     .filter(Boolean)
     .sort((a, b) => a.timestampSeconds - b.timestampSeconds);
 
+  const headline = safeString(analysis?.headline, 300);
+  const oneLineThesis = safeString(analysis?.oneLineThesis, 1200);
+  const coreTakeaways = (
+    Array.isArray(analysis?.coreTakeaways) ? analysis.coreTakeaways : []
+  )
+    .slice(0, 8)
+    .map((item) => safeString(item, 600))
+    .filter(Boolean);
+
+  // Validate adaptive visualBoard blocks
+  let visualBoard = null;
+  if (analysis?.visualBoard && typeof analysis.visualBoard === "object") {
+    const rawBlocks = Array.isArray(analysis.visualBoard.blocks)
+      ? analysis.visualBoard.blocks
+      : [];
+    const blocks = rawBlocks
+      .slice(0, 8)
+      .map((block) => {
+        if (!block || typeof block !== "object") return null;
+        const type = safeString(block.type, 40).toLowerCase();
+        const title = safeString(block.title, 200);
+        if (type === "card_grid") {
+          const cards = (Array.isArray(block.cards) ? block.cards : [])
+            .slice(0, 6)
+            .map((card) => {
+              const label = safeString(card?.label, 160);
+              const points = (Array.isArray(card?.points) ? card.points : [])
+                .slice(0, 8)
+                .map((p) => safeString(p, 400))
+                .filter(Boolean);
+              if (!label || !points.length) return null;
+              return { label, tone: safeTone(card?.tone), points };
+            })
+            .filter(Boolean);
+          return cards.length ? { type, title, cards } : null;
+        }
+        if (type === "comparison_table") {
+          const columns = (Array.isArray(block.columns) ? block.columns : [])
+            .slice(0, 6)
+            .map((c) => safeString(c, 120))
+            .filter(Boolean);
+          const rows = (Array.isArray(block.rows) ? block.rows : [])
+            .slice(0, 12)
+            .map((row) =>
+              Array.isArray(row)
+                ? row.slice(0, columns.length || 6).map((cell) => safeString(cell, 300))
+                : null,
+            )
+            .filter((row) => row && row.some(Boolean));
+          return columns.length >= 2 && rows.length
+            ? { type, title, columns, rows }
+            : null;
+        }
+        if (type === "process_flow") {
+          const steps = (Array.isArray(block.steps) ? block.steps : [])
+            .slice(0, 8)
+            .map((step, idx) => {
+              const stepTitle = safeString(step?.title, 200);
+              const detail = safeString(step?.detail, 500);
+              if (!stepTitle && !detail) return null;
+              const sec = safeSeconds(step?.timestampSeconds, step?.timestamp);
+              return {
+                step: safeString(step?.step, 16) || String(idx + 1).padStart(2, "0"),
+                title: stepTitle,
+                detail,
+                timestampSeconds: sec,
+                timestamp: sec !== null ? formatTimestamp(sec) : "",
+              };
+            })
+            .filter(Boolean);
+          return steps.length ? { type, title, steps } : null;
+        }
+        if (type === "metric_strip") {
+          const metrics = (Array.isArray(block.metrics) ? block.metrics : [])
+            .slice(0, 6)
+            .map((metric) => {
+              const value = safeString(metric?.value, 100);
+              const label = safeString(metric?.label, 140);
+              if (!value || !label) return null;
+              return {
+                value,
+                label,
+                context: safeString(metric?.context, 300),
+              };
+            })
+            .filter(Boolean);
+          return metrics.length ? { type, title, metrics } : null;
+        }
+        if (type === "perspective_split") {
+          const perspectives = (
+            Array.isArray(block.perspectives) ? block.perspectives : []
+          )
+            .slice(0, 6)
+            .map((item) => {
+              const speaker = safeString(item?.speaker, 120);
+              const stance = safeString(item?.stance, 300);
+              const argumentsList = (
+                Array.isArray(item?.arguments) ? item.arguments : []
+              )
+                .slice(0, 6)
+                .map((arg) => safeString(arg, 400))
+                .filter(Boolean);
+              if (!speaker && !stance) return null;
+              return { speaker, stance, arguments: argumentsList };
+            })
+            .filter(Boolean);
+          return perspectives.length ? { type, title, perspectives } : null;
+        }
+        return null;
+      })
+      .filter(Boolean);
+
+    if (blocks.length) {
+      visualBoard = {
+        title: safeString(analysis.visualBoard.title, 200) || headline,
+        blocks,
+      };
+    }
+  }
+
+  // Validate deep structured brief sections
+  const briefSections = (
+    Array.isArray(analysis?.briefSections) ? analysis.briefSections : []
+  )
+    .slice(0, 12)
+    .map((section) => {
+      const title = safeString(section?.title, 250);
+      const lead = safeString(section?.lead, 800);
+      const importance =
+        safeString(section?.importance, 20).toLowerCase() === "supporting"
+          ? "supporting"
+          : "core";
+      const points = (Array.isArray(section?.points) ? section.points : [])
+        .slice(0, 12)
+        .map((pt) => {
+          const heading = safeString(pt?.heading, 240);
+          const detail = safeString(pt?.detail, 1500);
+          if (!heading && !detail) return null;
+          const sec = safeSeconds(pt?.timestampSeconds, pt?.timestamp);
+          return {
+            heading,
+            detail,
+            timestampSeconds: sec,
+            timestamp: sec !== null ? formatTimestamp(sec) : "",
+          };
+        })
+        .filter(Boolean);
+      if (!title || (!lead && !points.length)) return null;
+      return { title, importance, lead, points };
+    })
+    .filter(Boolean);
+
+  const actionableItems = (
+    Array.isArray(analysis?.actionableItems) ? analysis.actionableItems : []
+  )
+    .slice(0, 10)
+    .map((item) => {
+      const title = safeString(item?.title, 240);
+      const detail = safeString(item?.detail, 800);
+      if (!title && !detail) return null;
+      return { title, detail };
+    })
+    .filter(Boolean);
+
+  const mentionedResources = (
+    Array.isArray(analysis?.mentionedResources)
+      ? analysis.mentionedResources
+      : []
+  )
+    .slice(0, 15)
+    .map((item) => {
+      const name = safeString(item?.name, 200);
+      const note = safeString(item?.note, 500);
+      if (!name) return null;
+      return { name, note };
+    })
+    .filter(Boolean);
+
   const keyMoments = (
     Array.isArray(analysis?.keyMoments) ? analysis.keyMoments : []
   )
-    .map(safeSeconds)
+    .map((s) => safeSeconds(s))
     .filter((seconds) => seconds !== null)
     .slice(0, 100);
 
-  return { chapters, keyQuotes, keyMoments };
+  return {
+    headline,
+    oneLineThesis,
+    coreTakeaways,
+    visualBoard,
+    briefSections,
+    chapters,
+    keyQuotes,
+    actionableItems,
+    mentionedResources,
+    keyMoments,
+  };
 }
 
 // ============================================================
@@ -1350,7 +2556,8 @@ async function cleanupNoteText(
       variables,
     );
     const { text: resultText } = await requestAiCompletion({
-      maxTokens: 512,
+      maxTokens: 1536,
+      reasoningEffort: settings.reasoningEffort === "off" ? "off" : "low",
       responseFormat: { type: "json_object" },
       messages: [
         { role: "system", content: systemPrompt },
@@ -1453,7 +2660,7 @@ async function handleExplainSelection(
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "DeepSeek API key not configured.",
+        message: "TokenRouter API key not configured.",
       };
     }
 
@@ -1475,7 +2682,8 @@ async function handleExplainSelection(
 
     debugLog("[YouTube Digest] Requesting selection explanation");
     const { text: explanation } = await requestAiCompletion({
-      maxTokens: 1024,
+      maxTokens: 2048,
+      reasoningEffort: settings.reasoningEffort === "off" ? "off" : "low",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
@@ -1621,7 +2829,7 @@ async function handleTranslateContent(
 
     const settings = await getSettings();
     if (!settings.aiApiKey) {
-      return { success: false, error: "DeepSeek API key not configured" };
+      return { success: false, error: "TokenRouter API key not configured" };
     }
 
     const sourceSegments = validateTranscriptBatchRequest(content);
@@ -1643,7 +2851,8 @@ async function handleTranslateContent(
     const userContent = JSON.stringify({ segments: sourceSegments });
     const translationOptions = {
       temperature: 0.2,
-      maxTokens: 1536,
+      maxTokens: 4096,
+      reasoningEffort: settings.reasoningEffort === "off" ? "off" : "low",
       responseFormat: { type: "json_object" },
     };
     let result = await callAiTranslation(
@@ -1653,8 +2862,12 @@ async function handleTranslateContent(
     );
 
     // DeepSeek JSON mode can rarely return an empty content string. The prompt
-    // already requires JSON, so retry once without response_format.
-    if (!result.success && result.code === "EMPTY_AI_RESPONSE") {
+    // already requires JSON, so retry once without response_format (DeepSeek only).
+    if (
+      settings.provider === "deepseek" &&
+      !result.success &&
+      result.code === "EMPTY_AI_RESPONSE"
+    ) {
       result = await callAiTranslation(systemPrompt, userContent, {
         temperature: translationOptions.temperature,
         maxTokens: translationOptions.maxTokens,
@@ -1688,12 +2901,13 @@ async function handleTranslateContent(
 async function callAiTranslation(
   systemPrompt,
   userContent,
-  { temperature = 0.3, maxTokens = 8192, responseFormat } = {},
+  { temperature = 0.3, maxTokens = 8192, reasoningEffort, responseFormat } = {},
 ) {
   try {
     const { text } = await requestAiCompletion({
       temperature,
       maxTokens,
+      reasoningEffort,
       responseFormat,
       messages: [
         { role: "system", content: systemPrompt },
@@ -1717,6 +2931,13 @@ async function callAiTranslation(
 // Pure validators are exposed for the repository's Node tests only.
 globalThis.__YTD_TRANSLATION_TESTING__ = {
   requestAiCompletion,
+  requestGoogleGeminiCompletion,
+  buildGeminiRequestBody,
+  extractGeminiUsageStats,
+  parseLooseJson,
+  validateAndFixTimestamps,
+  handleAnalyzeTranscript,
+  handleAnalyzeChapters,
   callAiTranslation,
   validateTranscriptBatchRequest,
   normalizeTranslatedSegmentBatch,

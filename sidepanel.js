@@ -17,15 +17,22 @@ const debugLog = (...args) => {
 let currentVideoId = null;
 let currentVideoUrl = null;
 let currentAnalysis = null;
+let currentChapters = null;
+let currentChaptersReasoning = "";
+let currentChaptersUsage = null;
 let currentTranscript = null;
 let currentTranscriptText = null; // Plain text (for display/export)
 let currentTranscriptTimestamped = null; // With timestamps for AI analysis
 let currentTranscriptLanguage = null;
+let currentTranscriptView = "subtitles"; // "subtitles" | "timeline"
 let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
-let isAnalysisLoading = false; // Track if analysis is in progress
+let isAnalysisLoading = false; // Track if overview analysis is in progress
+let activeAnalysisRequestId = null;
+let isChaptersLoading = false; // Track if timeline chapters analysis is in progress
+let activeChaptersRequestId = null;
 let youtubeTabId = null; // Store the YouTube tab ID for reliable messaging
 let errorAction = null;
 
@@ -284,6 +291,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     updateLoading(message.title, message.subtitle);
     sendResponse({ success: true });
   }
+  if (message.action === "analysisProgress") {
+    const isChaptersTarget = message.target === "chapters";
+    const expectedRequestId = isChaptersTarget
+      ? activeChaptersRequestId
+      : activeAnalysisRequestId;
+    if (expectedRequestId && message.requestId === expectedRequestId) {
+      const thinkingSection = document.getElementById(
+        isChaptersTarget ? "chaptersThinkingSection" : "thinkingSection",
+      );
+      const thinkingStatus = document.getElementById(
+        isChaptersTarget ? "chaptersThinkingStatus" : "thinkingStatus",
+      );
+      const thinkingOutput = document.getElementById(
+        isChaptersTarget ? "chaptersThinkingOutput" : "thinkingOutput",
+      );
+      if (message.phase === "thinking" && message.reasoningDelta) {
+        if (thinkingSection) thinkingSection.hidden = false;
+        if (thinkingStatus) thinkingStatus.textContent = "Thinking...";
+        if (thinkingOutput) {
+          const nearBottom =
+            thinkingOutput.scrollHeight -
+              thinkingOutput.scrollTop -
+              thinkingOutput.clientHeight <
+            40;
+          thinkingOutput.textContent += message.reasoningDelta;
+          if (nearBottom) {
+            thinkingOutput.scrollTop = thinkingOutput.scrollHeight;
+          }
+        }
+      } else if (message.phase === "writing") {
+        if (thinkingStatus) {
+          thinkingStatus.textContent = isChaptersTarget
+            ? "Generating timeline chapters..."
+            : "Building visual board and executive digest...";
+        }
+      }
+    }
+    sendResponse({ success: true });
+  }
   if (message.action === "noteSaved") {
     // Refresh notes list when a new note is saved
     const filterAll = document
@@ -414,13 +460,33 @@ function setupEventListeners() {
     chrome.runtime.sendMessage({ action: "openOptions" });
   });
 
-  // Transcript actions
+  // Transcript actions & dual-mode switcher (Subtitles / Timeline)
+  document.querySelectorAll(".transcript-view-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      switchTranscriptView(button.dataset.transcriptView);
+    });
+  });
+  document
+    .getElementById("regenerateChaptersBtn")
+    ?.addEventListener("click", () => triggerChaptersAnalysis({ force: true }));
   document
     .getElementById("copyTranscriptBtn")
     ?.addEventListener("click", copyTranscript);
   document
     .getElementById("exportTranscriptBtn")
     ?.addEventListener("click", exportTranscript);
+
+  // Overview actions
+  document
+    .getElementById("exportOverviewHtmlBtn")
+    ?.addEventListener("click", exportOverviewHtml);
+  document
+    .getElementById("copyOverviewMdBtn")
+    ?.addEventListener("click", copyOverviewMarkdown);
+  document
+    .getElementById("regenerateOverviewBtn")
+    ?.addEventListener("click", () => triggerAnalysis({ force: true }));
+
   document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
     button.addEventListener("click", () => {
       handleDisplayLanguageModeChange(button.dataset.transcriptMode);
@@ -575,6 +641,30 @@ async function startDigest(videoId, videoUrl) {
   // Every video change invalidates observer work and in-flight translations.
   if (videoChanged) {
     translationGeneration += 1;
+    activeAnalysisRequestId = null;
+    activeChaptersRequestId = null;
+    isAnalysisLoading = false;
+    isChaptersLoading = false;
+    currentChapters = null;
+    currentChaptersReasoning = "";
+    currentChaptersUsage = null;
+    applyTranscriptViewUi("subtitles");
+    renderThinkingSection({
+      visible: false,
+      open: false,
+      status: "Thinking process",
+      meta: "",
+      text: "",
+    });
+    renderChaptersThinkingSection({
+      visible: false,
+      open: false,
+      status: "Thinking process",
+      meta: "",
+      text: "",
+    });
+    resetOverviewUi();
+    resetChaptersUi();
     if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
     transcriptScrollObserver = null;
     resetTranscriptSearch();
@@ -598,11 +688,21 @@ async function startDigest(videoId, videoUrl) {
     currentVideoId = videoId;
     currentVideoUrl = videoUrl;
     currentAnalysis = cached.analysis || null;
+    currentChapters =
+      Array.isArray(cached.chapters) && cached.chapters.length
+        ? cached.chapters
+        : Array.isArray(cached.analysis?.chapters) &&
+            cached.analysis.chapters.length
+          ? cached.analysis.chapters
+          : null;
+    currentChaptersReasoning = cached.chaptersReasoning || "";
+    currentChaptersUsage = cached.chaptersUsage || null;
     currentTranscript = cached.transcript;
     currentTranscriptText = cached.transcriptText;
     currentTranscriptTimestamped = cached.transcriptTimestamped;
     currentTranscriptLanguage = cached.transcriptLanguage || null;
     isAnalysisLoading = false;
+    isChaptersLoading = false;
 
     // Restore semantic-segment translations from persistent storage.
     if (cached.paragraphCache) {
@@ -626,6 +726,13 @@ async function startDigest(videoId, videoUrl) {
     // Always render transcript first
     renderTranscript();
 
+    if (currentChapters) {
+      renderChaptersList(currentChapters, {
+        reasoning: currentChaptersReasoning,
+        usage: currentChaptersUsage,
+      });
+    }
+
     // Render analysis if we have it cached
     if (currentAnalysis) {
       renderAnalysisResults(currentAnalysis);
@@ -648,11 +755,15 @@ async function startDigest(videoId, videoUrl) {
   currentVideoId = videoId;
   currentVideoUrl = videoUrl;
   currentAnalysis = null;
+  currentChapters = null;
+  currentChaptersReasoning = "";
+  currentChaptersUsage = null;
   currentTranscript = null;
   currentTranscriptText = null;
   currentTranscriptTimestamped = null;
   currentTranscriptLanguage = null;
   isAnalysisLoading = false;
+  isChaptersLoading = false;
 
   if (currentVideoTitle || currentChannelName) {
     const videoInfo = document.getElementById("videoInfo");
@@ -721,6 +832,31 @@ function getInterfaceTranslation(surface, id, text) {
   return interfaceTranslationCache.get(
     interfaceTranslationCacheKey(surface, id, text),
   );
+}
+
+function renderAnchoredCopy(text, surface, id) {
+  const formatLeadIn = (str) => {
+    const escaped = escapeHtml(str);
+    const match = escaped.match(/^([^:：]{2,42})([:：])(\s*[\s\S]+)$/);
+    if (match) {
+      return `<strong class="takeaway-anchor">${match[1]}${match[2]}</strong>${match[3]}`;
+    }
+    return escaped;
+  };
+  const original = String(text || "");
+  if (!original) return "";
+  if (currentTranscriptMode === "original") return formatLeadIn(original);
+  const cacheKey = interfaceTranslationCacheKey(surface, id, original);
+  const translated = getInterfaceTranslation(surface, id, original);
+  const translation = translated
+    ? formatLeadIn(translated)
+    : interfaceTranslationFailures.has(cacheKey)
+      ? '<span class="translation-error">Translation unavailable.</span>'
+      : '<span class="translation-pending">Translating...</span>';
+  if (currentTranscriptMode === "bilingual") {
+    return `<span class="localized-copy"><span class="localized-original">${formatLeadIn(original)}</span><span class="localized-translation">${translation}</span></span>`;
+  }
+  return `<span class="localized-copy"><span class="localized-translation">${translation}</span></span>`;
 }
 
 function renderLocalizedContent(text, surface, id) {
@@ -831,10 +967,10 @@ async function translateInterfaceSegments(surface, segments, rerender) {
   }
 }
 
-function getOverviewTranslationSegments() {
-  if (!currentAnalysis) return [];
+function getChaptersTranslationSegments() {
+  if (!Array.isArray(currentChapters) || !currentChapters.length) return [];
   const segments = [];
-  (currentAnalysis.chapters || []).forEach((chapter, index) => {
+  currentChapters.forEach((chapter, index) => {
     if (chapter.title) {
       segments.push({ id: `chapter-${index}-title`, text: chapter.title });
     }
@@ -842,11 +978,105 @@ function getOverviewTranslationSegments() {
       segments.push({ id: `chapter-${index}-summary`, text: chapter.summary });
     }
   });
+  return segments;
+}
+
+function translateChaptersContent() {
+  return translateInterfaceSegments(
+    "chapters",
+    getChaptersTranslationSegments(),
+    () => {
+      const contentArea = document.getElementById("contentArea");
+      const scrollTop = contentArea?.scrollTop || 0;
+      renderChaptersList(currentChapters, {
+        reasoning: currentChaptersReasoning,
+        usage: currentChaptersUsage,
+      });
+      if (contentArea) contentArea.scrollTop = scrollTop;
+    },
+  );
+}
+
+function getOverviewTranslationSegments() {
+  if (!currentAnalysis) return [];
+  const segments = [];
+  const pushIf = (id, text) => {
+    if (typeof text === "string" && text.trim()) {
+      segments.push({ id, text: text.trim() });
+    }
+  };
+
+  pushIf("headline", currentAnalysis.headline);
+  pushIf("thesis", currentAnalysis.oneLineThesis);
+  (currentAnalysis.coreTakeaways || []).forEach((item, idx) => {
+    pushIf(`takeaway-${idx}`, item);
+  });
+
+  if (currentAnalysis.visualBoard) {
+    pushIf("board-title", currentAnalysis.visualBoard.title);
+    (currentAnalysis.visualBoard.blocks || []).forEach((block, bIdx) => {
+      pushIf(`board-${bIdx}-title`, block.title);
+      if (block.type === "card_grid") {
+        (block.cards || []).forEach((card, cIdx) => {
+          pushIf(`board-${bIdx}-card-${cIdx}-label`, card.label);
+          (card.points || []).forEach((pt, pIdx) => {
+            pushIf(`board-${bIdx}-card-${cIdx}-pt-${pIdx}`, pt);
+          });
+        });
+      } else if (block.type === "comparison_table") {
+        (block.columns || []).forEach((col, colIdx) => {
+          pushIf(`board-${bIdx}-col-${colIdx}`, col);
+        });
+        (block.rows || []).forEach((row, rIdx) => {
+          (row || []).forEach((cell, cIdx) => {
+            pushIf(`board-${bIdx}-row-${rIdx}-cell-${cIdx}`, cell);
+          });
+        });
+      } else if (block.type === "process_flow") {
+        (block.steps || []).forEach((step, sIdx) => {
+          pushIf(`board-${bIdx}-step-${sIdx}-title`, step.title);
+          pushIf(`board-${bIdx}-step-${sIdx}-detail`, step.detail);
+        });
+      } else if (block.type === "metric_strip") {
+        (block.metrics || []).forEach((m, mIdx) => {
+          pushIf(`board-${bIdx}-metric-${mIdx}-label`, m.label);
+          pushIf(`board-${bIdx}-metric-${mIdx}-ctx`, m.context);
+        });
+      } else if (block.type === "perspective_split") {
+        (block.perspectives || []).forEach((p, pIdx) => {
+          pushIf(`board-${bIdx}-persp-${pIdx}-stance`, p.stance);
+          (p.arguments || []).forEach((arg, aIdx) => {
+            pushIf(`board-${bIdx}-persp-${pIdx}-arg-${aIdx}`, arg);
+          });
+        });
+      }
+    });
+  }
+
+  (currentAnalysis.briefSections || []).forEach((section, sIdx) => {
+    pushIf(`brief-${sIdx}-title`, section.title);
+    pushIf(`brief-${sIdx}-lead`, section.lead);
+    (section.points || []).forEach((pt, pIdx) => {
+      pushIf(`brief-${sIdx}-pt-${pIdx}-head`, pt.heading);
+      pushIf(`brief-${sIdx}-pt-${pIdx}-detail`, pt.detail);
+    });
+  });
+
   [...(currentAnalysis.keyQuotes || [])]
     .sort((a, b) => (a.timestampSeconds || 0) - (b.timestampSeconds || 0))
     .forEach((quote, index) => {
-      if (quote.quote) segments.push({ id: `quote-${index}`, text: quote.quote });
+      pushIf(`quote-${index}`, quote.quote);
     });
+
+  (currentAnalysis.actionableItems || []).forEach((item, idx) => {
+    pushIf(`action-${idx}-title`, item.title);
+    pushIf(`action-${idx}-detail`, item.detail);
+  });
+
+  (currentAnalysis.mentionedResources || []).forEach((item, idx) => {
+    pushIf(`res-${idx}-note`, item.note);
+  });
+
   return segments;
 }
 
@@ -883,23 +1113,129 @@ function translateNotesContent() {
   });
 }
 
-/**
- * Renders the analysis results into the Overview tab.
- * Shows chapters and key quotes only.
- */
-function renderAnalysisResults(analysis) {
-  // Chapters
+function formatAnalysisMeta(usage) {
+  if (!usage || typeof usage !== "object") return "";
+  const parts = [];
+  if (Number(usage.reasoningTokens) > 0) {
+    parts.push(`Reasoning ${usage.reasoningTokens} tok`);
+  }
+  if (Number(usage.cachedTokens) > 0) {
+    parts.push(`Cache hit ${usage.cachedTokens} tok`);
+  }
+  return parts.join(" / ");
+}
+
+function renderThinkingSectionFor(
+  ids,
+  {
+    visible = false,
+    open = false,
+    status = "Thinking process",
+    meta = "",
+    text = "",
+  } = {},
+) {
+  const section = document.getElementById(ids.section);
+  if (!section) return;
+  section.hidden = !visible;
+  section.open = Boolean(open);
+  const statusEl = document.getElementById(ids.status);
+  const metaEl = document.getElementById(ids.meta);
+  const outputEl = document.getElementById(ids.output);
+  if (statusEl) statusEl.textContent = status;
+  if (metaEl) metaEl.textContent = meta;
+  if (outputEl) outputEl.textContent = text;
+}
+
+function renderThinkingSection(options = {}) {
+  renderThinkingSectionFor(
+    {
+      section: "thinkingSection",
+      status: "thinkingStatus",
+      meta: "thinkingMeta",
+      output: "thinkingOutput",
+    },
+    options,
+  );
+}
+
+function renderChaptersThinkingSection(options = {}) {
+  renderThinkingSectionFor(
+    {
+      section: "chaptersThinkingSection",
+      status: "chaptersThinkingStatus",
+      meta: "chaptersThinkingMeta",
+      output: "chaptersThinkingOutput",
+    },
+    options,
+  );
+}
+
+function resetOverviewUi() {
+  const container = document.getElementById("overviewDigestContainer");
+  if (container) {
+    container.innerHTML =
+      '<div class="digest-placeholder">Open Overview to generate a visual synthesis board and deep executive digest...</div>';
+  }
+  const quotesList = document.getElementById("quotesList");
+  if (quotesList) {
+    quotesList.innerHTML =
+      '<div class="quote-item" style="color: var(--text-muted); border-left-color: var(--border); cursor: default;"><div class="quote-text" style="font-style: normal">Quotes will be extracted when you view this tab...</div></div>';
+  }
+  const exportBtn = document.getElementById("exportOverviewHtmlBtn");
+  const copyMdBtn = document.getElementById("copyOverviewMdBtn");
+  if (exportBtn) exportBtn.disabled = true;
+  if (copyMdBtn) copyMdBtn.disabled = true;
+}
+
+function resetChaptersUi() {
   const chapterList = document.getElementById("chapterList");
+  if (chapterList) {
+    chapterList.innerHTML =
+      '<li class="chapter-item chapter-placeholder">Switch to Timeline to generate a proportional chapter outline...</li>';
+  }
+}
+
+/**
+ * Renders the Timeline Chapters list inside Transcript -> Timeline mode.
+ */
+function renderChaptersList(chapters, { reasoning = "", usage = null } = {}) {
+  if (reasoning) {
+    renderChaptersThinkingSection({
+      visible: true,
+      open: false,
+      status: "Thinking process",
+      meta: formatAnalysisMeta(usage),
+      text: reasoning,
+    });
+  } else {
+    renderChaptersThinkingSection({ visible: false });
+  }
+
+  const chapterList = document.getElementById("chapterList");
+  if (!chapterList) return;
   chapterList.innerHTML = "";
-  (analysis.chapters || []).forEach((chapter, index) => {
+
+  const list = Array.isArray(chapters) ? chapters : [];
+  if (!list.length) {
+    chapterList.innerHTML =
+      '<li class="chapter-item chapter-placeholder">No substantive chapters found.</li>';
+    return;
+  }
+
+  list.forEach((chapter, index) => {
     const li = document.createElement("li");
-    li.className = "chapter-item";
+    const importanceClass =
+      chapter.importance === "supporting"
+        ? "chapter-supporting"
+        : "chapter-core";
+    li.className = `chapter-item ${importanceClass}`;
     li.dataset.seconds = chapter.timestampSeconds;
     li.innerHTML = `
       <span class="chapter-timestamp">${escapeHtml(chapter.timestamp)}</span>
       <div class="chapter-content">
-        <span class="chapter-title">${renderLocalizedContent(chapter.title, "overview", `chapter-${index}-title`)}</span>
-        <span class="chapter-summary">${renderLocalizedContent(chapter.summary || "", "overview", `chapter-${index}-summary`)}</span>
+        <span class="chapter-title">${renderLocalizedContent(chapter.title, "chapters", `chapter-${index}-title`)}</span>
+        <span class="chapter-summary">${renderLocalizedContent(chapter.summary || "", "chapters", `chapter-${index}-summary`)}</span>
       </div>
     `;
     li.addEventListener("click", () => {
@@ -913,59 +1249,408 @@ function renderAnalysisResults(analysis) {
     chapterList.appendChild(li);
   });
 
+  if (
+    currentTranscriptMode !== "original" &&
+    transcriptTabIsActive() &&
+    currentTranscriptView === "timeline"
+  ) {
+    void translateChaptersContent();
+  }
+}
+
+/**
+ * Pure, XSS-safe renderer for the adaptive Visual Synthesis Board.
+ * Converts validated JSON board blocks into warm editorial HTML components.
+ */
+function renderVisualBoardMarkup(visualBoard, localizeFn = null) {
+  if (!visualBoard || !Array.isArray(visualBoard.blocks) || !visualBoard.blocks.length) {
+    return "";
+  }
+  const loc =
+    typeof localizeFn === "function"
+      ? localizeFn
+      : (text) => escapeHtml(text || "");
+
+  const renderBlock = (block, bIdx) => {
+    const titleHtml = block.title
+      ? `<div class="board-block-title">${loc(block.title, `board-${bIdx}-title`)}</div>`
+      : "";
+
+    if (block.type === "card_grid" && Array.isArray(block.cards) && block.cards.length) {
+      const cardsHtml = block.cards
+        .map((card, cIdx) => {
+          const tone = ["terracotta", "sage", "sand", "slate"].includes(card.tone)
+            ? card.tone
+            : "sand";
+          const ptsHtml = (card.points || [])
+            .map(
+              (pt, pIdx) =>
+                `<li>${loc(pt, `board-${bIdx}-card-${cIdx}-pt-${pIdx}`)}</li>`,
+            )
+            .join("");
+          return `
+            <div class="board-card tone-${tone}">
+              <div class="board-card-head">${loc(card.label, `board-${bIdx}-card-${cIdx}-label`)}</div>
+              <ul class="board-card-points">${ptsHtml}</ul>
+            </div>
+          `;
+        })
+        .join("");
+      return `<div class="board-block">${titleHtml}<div class="board-card-grid">${cardsHtml}</div></div>`;
+    }
+
+    if (
+      block.type === "comparison_table" &&
+      Array.isArray(block.columns) &&
+      block.columns.length >= 2 &&
+      Array.isArray(block.rows) &&
+      block.rows.length
+    ) {
+      const theadHtml = block.columns
+        .map((col, cIdx) => `<th>${loc(col, `board-${bIdx}-col-${cIdx}`)}</th>`)
+        .join("");
+      const tbodyHtml = block.rows
+        .map((row, rIdx) => {
+          const cells = block.columns
+            .map((_, cIdx) => {
+              const val = Array.isArray(row) ? row[cIdx] || "" : "";
+              return `<td>${loc(val, `board-${bIdx}-row-${rIdx}-cell-${cIdx}`)}</td>`;
+            })
+            .join("");
+          return `<tr>${cells}</tr>`;
+        })
+        .join("");
+      return `
+        <div class="board-block">
+          ${titleHtml}
+          <div class="board-table-wrap">
+            <table class="board-table">
+              <thead><tr>${theadHtml}</tr></thead>
+              <tbody>${tbodyHtml}</tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    if (block.type === "process_flow" && Array.isArray(block.steps) && block.steps.length) {
+      const stepsHtml = block.steps
+        .map((step, sIdx) => {
+          const tsHtml =
+            step.timestamp && Number.isFinite(Number(step.timestampSeconds))
+              ? `<button class="inline-ts-btn" type="button" data-seek-seconds="${Number(step.timestampSeconds)}">${escapeHtml(step.timestamp)}</button>`
+              : "";
+          return `
+            <div class="board-flow-step">
+              <span class="board-flow-num">${escapeHtml(step.step || String(sIdx + 1).padStart(2, "0"))}</span>
+              <div class="board-flow-body">
+                <div class="board-flow-head">
+                  <span class="board-flow-title">${loc(step.title, `board-${bIdx}-step-${sIdx}-title`)}</span>
+                  ${tsHtml}
+                </div>
+                ${step.detail ? `<div class="board-flow-detail">${loc(step.detail, `board-${bIdx}-step-${sIdx}-detail`)}</div>` : ""}
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+      return `<div class="board-block">${titleHtml}<div class="board-flow">${stepsHtml}</div></div>`;
+    }
+
+    if (block.type === "metric_strip" && Array.isArray(block.metrics) && block.metrics.length) {
+      const metricsHtml = block.metrics
+        .map(
+          (m, mIdx) => `
+            <div class="board-metric-card">
+              <div class="board-metric-value">${escapeHtml(m.value)}</div>
+              <div class="board-metric-label">${loc(m.label, `board-${bIdx}-metric-${mIdx}-label`)}</div>
+              ${m.context ? `<div class="board-metric-context">${loc(m.context, `board-${bIdx}-metric-${mIdx}-ctx`)}</div>` : ""}
+            </div>
+          `,
+        )
+        .join("");
+      return `<div class="board-block">${titleHtml}<div class="board-metric-strip">${metricsHtml}</div></div>`;
+    }
+
+    if (
+      block.type === "perspective_split" &&
+      Array.isArray(block.perspectives) &&
+      block.perspectives.length
+    ) {
+      const cardsHtml = block.perspectives
+        .map((p, pIdx) => {
+          const argsHtml = (p.arguments || [])
+            .map(
+              (arg, aIdx) =>
+                `<li>${loc(arg, `board-${bIdx}-persp-${pIdx}-arg-${aIdx}`)}</li>`,
+            )
+            .join("");
+          return `
+            <div class="board-perspective-card">
+              ${p.speaker ? `<div class="board-perspective-speaker">${escapeHtml(p.speaker)}</div>` : ""}
+              ${p.stance ? `<div class="board-perspective-stance">${loc(p.stance, `board-${bIdx}-persp-${pIdx}-stance`)}</div>` : ""}
+              ${argsHtml ? `<ul class="board-perspective-args">${argsHtml}</ul>` : ""}
+            </div>
+          `;
+        })
+        .join("");
+      return `<div class="board-block">${titleHtml}<div class="board-perspective-grid">${cardsHtml}</div></div>`;
+    }
+
+    return "";
+  };
+
+  const blocksHtml = visualBoard.blocks.map(renderBlock).filter(Boolean).join("");
+  if (!blocksHtml) return "";
+
+  return `
+    <section class="visual-board" aria-label="Visual synthesis board">
+      <div class="visual-board-header">
+        <div class="visual-board-title">${loc(visualBoard.title || "Visual Summary", "board-title")}</div>
+        <span class="visual-board-eyebrow">Visual Board</span>
+      </div>
+      ${blocksHtml}
+    </section>
+  `;
+}
+
+/**
+ * Renders the Executive Digest results into the Overview tab:
+ * Hero thesis + Core takeaways + Adaptive Visual Synthesis Board +
+ * Deep Structured Brief + Actionable items / Resources + Key Quotes.
+ */
+function renderAnalysisResults(analysis) {
+  if (!analysis || typeof analysis !== "object") return;
+
+  if (analysis.reasoning) {
+    renderThinkingSection({
+      visible: true,
+      open: false,
+      status: "Thinking process",
+      meta: formatAnalysisMeta(analysis.usage),
+      text: analysis.reasoning,
+    });
+  } else {
+    renderThinkingSection({
+      visible: false,
+      open: false,
+      status: "Thinking process",
+      meta: "",
+      text: "",
+    });
+  }
+
+  const exportBtn = document.getElementById("exportOverviewHtmlBtn");
+  const copyMdBtn = document.getElementById("copyOverviewMdBtn");
+  if (exportBtn) exportBtn.disabled = false;
+  if (copyMdBtn) copyMdBtn.disabled = false;
+
+  const container = document.getElementById("overviewDigestContainer");
+  if (container) {
+    const loc = (text, id) => renderLocalizedContent(text, "overview", id);
+    const parts = [];
+
+    // 1. Hero thesis + Core Takeaways
+    const hasHero =
+      analysis.headline ||
+      analysis.oneLineThesis ||
+      (analysis.coreTakeaways && analysis.coreTakeaways.length);
+    if (hasHero) {
+      const takeawaysHtml =
+        analysis.coreTakeaways && analysis.coreTakeaways.length
+          ? `
+            <div class="takeaways-box">
+              <div class="takeaways-label">Core Insights</div>
+              <ul class="takeaways-list">
+                ${analysis.coreTakeaways
+                  .map(
+                    (item, idx) =>
+                      `<li>${renderAnchoredCopy(item, "overview", `takeaway-${idx}`)}</li>`,
+                  )
+                  .join("")}
+              </ul>
+            </div>
+          `
+          : "";
+      parts.push(`
+        <section class="digest-hero">
+          ${analysis.headline ? `<h2 class="digest-headline">${loc(analysis.headline, "headline")}</h2>` : ""}
+          ${analysis.oneLineThesis ? `<p class="digest-thesis">${loc(analysis.oneLineThesis, "thesis")}</p>` : ""}
+          ${takeawaysHtml}
+        </section>
+      `);
+    }
+
+    // 2. Adaptive Visual Synthesis Board
+    if (analysis.visualBoard) {
+      parts.push(renderVisualBoardMarkup(analysis.visualBoard, loc));
+    }
+
+    // 3. Deep Structured Brief (thematic, non-chronological)
+    if (Array.isArray(analysis.briefSections) && analysis.briefSections.length) {
+      const sectionsHtml = analysis.briefSections
+        .map((section, sIdx) => {
+          const importanceClass =
+            section.importance === "supporting"
+              ? "importance-supporting"
+              : "importance-core";
+          const pointsHtml = (section.points || [])
+            .map((pt, pIdx) => {
+              const tsBtn =
+                pt.timestamp && Number.isFinite(Number(pt.timestampSeconds))
+                  ? `<button class="inline-ts-btn" type="button" data-seek-seconds="${Number(pt.timestampSeconds)}">${escapeHtml(pt.timestamp)}</button>`
+                  : "";
+              return `
+                <li class="brief-point">
+                  <div class="brief-point-head">
+                    <span class="brief-point-heading">${loc(pt.heading, `brief-${sIdx}-pt-${pIdx}-head`)}</span>
+                    ${tsBtn}
+                  </div>
+                  ${pt.detail ? `<div class="brief-point-detail">${loc(pt.detail, `brief-${sIdx}-pt-${pIdx}-detail`)}</div>` : ""}
+                </li>
+              `;
+            })
+            .join("");
+          return `
+            <article class="brief-section-card ${importanceClass}">
+              <h3 class="brief-section-title">${loc(section.title, `brief-${sIdx}-title`)}</h3>
+              ${section.lead ? `<p class="brief-section-lead">${loc(section.lead, `brief-${sIdx}-lead`)}</p>` : ""}
+              ${pointsHtml ? `<ul class="brief-points">${pointsHtml}</ul>` : ""}
+            </article>
+          `;
+        })
+        .join("");
+      parts.push(`
+        <div class="section">
+          <div class="section-title">Deep Brief</div>
+          <div class="brief-sections">${sectionsHtml}</div>
+        </div>
+      `);
+    }
+
+    // 4. Optional Actionable Takeaways
+    if (Array.isArray(analysis.actionableItems) && analysis.actionableItems.length) {
+      const itemsHtml = analysis.actionableItems
+        .map(
+          (item, idx) => `
+            <li class="digest-extras-item">
+              ${item.title ? `<strong>${loc(item.title, `action-${idx}-title`)}</strong>` : ""}
+              ${item.title && item.detail ? ": " : ""}
+              ${item.detail ? loc(item.detail, `action-${idx}-detail`) : ""}
+            </li>
+          `,
+        )
+        .join("");
+      parts.push(`
+        <div class="section">
+          <div class="section-title">Actionable Takeaways</div>
+          <div class="digest-extras-card">
+            <ul class="digest-extras-list">${itemsHtml}</ul>
+          </div>
+        </div>
+      `);
+    }
+
+    // 5. Optional Mentioned Resources
+    if (
+      Array.isArray(analysis.mentionedResources) &&
+      analysis.mentionedResources.length
+    ) {
+      const resHtml = analysis.mentionedResources
+        .map(
+          (item, idx) => `
+            <div class="resource-item">
+              <span class="resource-name">${escapeHtml(item.name)}</span>
+              ${item.note ? `<span>${loc(item.note, `res-${idx}-note`)}</span>` : ""}
+            </div>
+          `,
+        )
+        .join("");
+      parts.push(`
+        <div class="section">
+          <div class="section-title">Mentioned Resources</div>
+          <div class="resource-chips">${resHtml}</div>
+        </div>
+      `);
+    }
+
+    // Legacy fallback if an old cached digest only contained chapters
+    if (!parts.length && Array.isArray(analysis.chapters) && analysis.chapters.length) {
+      parts.push(
+        '<div class="digest-placeholder">This cached summary uses the previous format. Click Regenerate to build the new Visual Board and Executive Digest.</div>',
+      );
+    }
+
+    container.innerHTML = parts.join("");
+    container.querySelectorAll("[data-seek-seconds]").forEach((btn) => {
+      btn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const sec = Number(btn.dataset.seekSeconds);
+        if (Number.isFinite(sec)) seekTo(sec);
+      });
+    });
+  }
+
   // Quotes - sort by timestamp (chronological order)
   const quotesList = document.getElementById("quotesList");
-  quotesList.innerHTML = "";
-  const sortedQuotes = [...(analysis.keyQuotes || [])].sort(
-    (a, b) => (a.timestampSeconds || 0) - (b.timestampSeconds || 0),
-  );
-  sortedQuotes.forEach((quote, index) => {
-    const div = document.createElement("div");
-    div.className = "quote-item";
-    div.dataset.seconds = quote.timestampSeconds;
-    div.innerHTML = `
-      <div class="quote-text">${renderLocalizedContent(quote.quote, "overview", `quote-${index}`)}</div>
-      <div class="quote-meta">
-        <span class="quote-timestamp">${escapeHtml(quote.timestamp)}</span>
-        <div class="quote-actions">
-          <button class="quote-save-note-btn" title="Save this quote as a note">Note</button>
-          <button class="quote-copy-btn" title="Copy this quote">Copy</button>
+  const quotesSection = document.getElementById("quotesSection");
+  if (quotesList) {
+    quotesList.innerHTML = "";
+    const sortedQuotes = [...(analysis.keyQuotes || [])].sort(
+      (a, b) => (a.timestampSeconds || 0) - (b.timestampSeconds || 0),
+    );
+    if (quotesSection) {
+      quotesSection.style.display = sortedQuotes.length ? "block" : "none";
+    }
+    sortedQuotes.forEach((quote, index) => {
+      const div = document.createElement("div");
+      div.className = "quote-item";
+      div.dataset.seconds = quote.timestampSeconds;
+      div.innerHTML = `
+        <div class="quote-text">${renderLocalizedContent(quote.quote, "overview", `quote-${index}`)}</div>
+        ${quote.speaker ? `<div class="quote-speaker">${escapeHtml(quote.speaker)}</div>` : ""}
+        <div class="quote-meta">
+          <span class="quote-timestamp">${escapeHtml(quote.timestamp)}</span>
+          <div class="quote-actions">
+            <button class="quote-save-note-btn" title="Save this quote as a note">Note</button>
+            <button class="quote-copy-btn" title="Copy this quote">Copy</button>
+          </div>
         </div>
-      </div>
-    `;
-    div.addEventListener("click", () => {
-      debugLog(
-        "[YouTube Digest Panel] Quote clicked:",
-        quote.timestamp,
-        quote.timestampSeconds,
-      );
-      seekTo(quote.timestampSeconds);
-    });
-
-    const quoteCopyBtn = div.querySelector(".quote-copy-btn");
-    quoteCopyBtn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      try {
-        await navigator.clipboard.writeText(
-          getLocalizedPlainText(quote.quote, "overview", `quote-${index}`),
+      `;
+      div.addEventListener("click", () => {
+        debugLog(
+          "[YouTube Digest Panel] Quote clicked:",
+          quote.timestamp,
+          quote.timestampSeconds,
         );
-        quoteCopyBtn.textContent = "Copied";
-        setTimeout(() => {
-          quoteCopyBtn.textContent = "Copy";
-        }, 1500);
-      } catch (err) {
-        console.error("Copy failed:", err);
-      }
-    });
+        seekTo(quote.timestampSeconds);
+      });
 
-    const quoteSaveNoteBtn = div.querySelector(".quote-save-note-btn");
-    quoteSaveNoteBtn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      await saveQuoteAsNote(quote, quoteSaveNoteBtn);
-    });
+      const quoteCopyBtn = div.querySelector(".quote-copy-btn");
+      quoteCopyBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(
+            getLocalizedPlainText(quote.quote, "overview", `quote-${index}`),
+          );
+          quoteCopyBtn.textContent = "Copied";
+          setTimeout(() => {
+            quoteCopyBtn.textContent = "Copy";
+          }, 1500);
+        } catch (err) {
+          console.error("Copy failed:", err);
+        }
+      });
 
-    quotesList.appendChild(div);
-  });
+      const quoteSaveNoteBtn = div.querySelector(".quote-save-note-btn");
+      quoteSaveNoteBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await saveQuoteAsNote(quote, quoteSaveNoteBtn);
+      });
+
+      quotesList.appendChild(div);
+    });
+  }
 
   if (
     currentTranscriptMode !== "original" &&
@@ -973,6 +1658,353 @@ function renderAnalysisResults(analysis) {
   ) {
     void translateOverviewContent();
   }
+}
+
+function buildOverviewMarkdown(analysis, meta = {}) {
+  if (!analysis || typeof analysis !== "object") return "";
+  const title = meta.videoTitle || currentVideoTitle || "YouTube Video";
+  const channel = meta.channelName || currentChannelName || "";
+  const videoId = meta.videoId || currentVideoId || "";
+  const baseUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : "";
+  const locText = (text, id) => getLocalizedPlainText(text, "overview", id);
+  const lines = [];
+
+  lines.push(`# ${locText(analysis.headline || title, "headline")}`);
+  if (channel || baseUrl) {
+    lines.push(
+      `> ${[channel, baseUrl].filter(Boolean).join(" | ")}`,
+    );
+  }
+  lines.push("");
+
+  if (analysis.oneLineThesis) {
+    lines.push(locText(analysis.oneLineThesis, "thesis"));
+    lines.push("");
+  }
+
+  if (Array.isArray(analysis.coreTakeaways) && analysis.coreTakeaways.length) {
+    lines.push("## Core Insights");
+    analysis.coreTakeaways.forEach((item, idx) => {
+      lines.push(`- ${locText(item, `takeaway-${idx}`)}`);
+    });
+    lines.push("");
+  }
+
+  if (analysis.visualBoard && Array.isArray(analysis.visualBoard.blocks)) {
+    lines.push(
+      `## ${locText(analysis.visualBoard.title || "Visual Board", "board-title")}`,
+    );
+    lines.push("");
+    analysis.visualBoard.blocks.forEach((block, bIdx) => {
+      if (block.title) {
+        lines.push(`### ${locText(block.title, `board-${bIdx}-title`)}`);
+      }
+      if (block.type === "card_grid") {
+        (block.cards || []).forEach((card, cIdx) => {
+          lines.push(
+            `**${locText(card.label, `board-${bIdx}-card-${cIdx}-label`)}**`,
+          );
+          (card.points || []).forEach((pt, pIdx) => {
+            lines.push(`- ${locText(pt, `board-${bIdx}-card-${cIdx}-pt-${pIdx}`)}`);
+          });
+          lines.push("");
+        });
+      } else if (block.type === "comparison_table" && block.columns?.length) {
+        const cols = block.columns.map((col, cIdx) =>
+          locText(col, `board-${bIdx}-col-${cIdx}`),
+        );
+        lines.push(`| ${cols.join(" | ")} |`);
+        lines.push(`| ${cols.map(() => "---").join(" | ")} |`);
+        (block.rows || []).forEach((row, rIdx) => {
+          const cells = block.columns.map((_, cIdx) =>
+            locText(Array.isArray(row) ? row[cIdx] || "" : "", `board-${bIdx}-row-${rIdx}-cell-${cIdx}`)
+              .replace(/\|/g, "\\|")
+              .replace(/\n/g, " "),
+          );
+          lines.push(`| ${cells.join(" | ")} |`);
+        });
+        lines.push("");
+      } else if (block.type === "process_flow") {
+        (block.steps || []).forEach((step, sIdx) => {
+          const num = step.step || String(sIdx + 1).padStart(2, "0");
+          const ts = step.timestamp ? ` (${step.timestamp})` : "";
+          lines.push(
+            `${num}. **${locText(step.title, `board-${bIdx}-step-${sIdx}-title`)}**${ts}: ${locText(step.detail || "", `board-${bIdx}-step-${sIdx}-detail`)}`,
+          );
+        });
+        lines.push("");
+      } else if (block.type === "metric_strip") {
+        (block.metrics || []).forEach((m, mIdx) => {
+          const ctx = m.context
+            ? ` (${locText(m.context, `board-${bIdx}-metric-${mIdx}-ctx`)})`
+            : "";
+          lines.push(
+            `- **${m.value}** - ${locText(m.label, `board-${bIdx}-metric-${mIdx}-label`)}${ctx}`,
+          );
+        });
+        lines.push("");
+      } else if (block.type === "perspective_split") {
+        (block.perspectives || []).forEach((p, pIdx) => {
+          lines.push(
+            `- **${p.speaker || "Perspective"}**: ${locText(p.stance || "", `board-${bIdx}-persp-${pIdx}-stance`)}`,
+          );
+          (p.arguments || []).forEach((arg, aIdx) => {
+            lines.push(`  - ${locText(arg, `board-${bIdx}-persp-${pIdx}-arg-${aIdx}`)}`);
+          });
+        });
+        lines.push("");
+      }
+    });
+  }
+
+  if (Array.isArray(analysis.briefSections) && analysis.briefSections.length) {
+    lines.push("## Deep Brief");
+    lines.push("");
+    analysis.briefSections.forEach((section, sIdx) => {
+      lines.push(`### ${locText(section.title, `brief-${sIdx}-title`)}`);
+      if (section.lead) {
+        lines.push(locText(section.lead, `brief-${sIdx}-lead`));
+      }
+      lines.push("");
+      (section.points || []).forEach((pt, pIdx) => {
+        const tsLink =
+          pt.timestamp && baseUrl && Number.isFinite(Number(pt.timestampSeconds))
+            ? ` ([${pt.timestamp}](${baseUrl}&t=${Number(pt.timestampSeconds)}s))`
+            : pt.timestamp
+              ? ` (${pt.timestamp})`
+              : "";
+        lines.push(
+          `- **${locText(pt.heading, `brief-${sIdx}-pt-${pIdx}-head`)}**${tsLink}: ${locText(pt.detail || "", `brief-${sIdx}-pt-${pIdx}-detail`)}`,
+        );
+      });
+      lines.push("");
+    });
+  }
+
+  if (Array.isArray(analysis.keyQuotes) && analysis.keyQuotes.length) {
+    lines.push("## Key Quotes");
+    analysis.keyQuotes.forEach((q, idx) => {
+      const who = q.speaker ? ` - ${q.speaker}` : "";
+      lines.push(
+        `> "${locText(q.quote, `quote-${idx}`)}"${who} (${q.timestamp})`,
+      );
+      lines.push("");
+    });
+  }
+
+  if (Array.isArray(analysis.actionableItems) && analysis.actionableItems.length) {
+    lines.push("## Actionable Takeaways");
+    analysis.actionableItems.forEach((item, idx) => {
+      lines.push(
+        `- **${locText(item.title, `action-${idx}-title`)}**: ${locText(item.detail || "", `action-${idx}-detail`)}`,
+      );
+    });
+    lines.push("");
+  }
+
+  if (
+    Array.isArray(analysis.mentionedResources) &&
+    analysis.mentionedResources.length
+  ) {
+    lines.push("## Mentioned Resources");
+    analysis.mentionedResources.forEach((item, idx) => {
+      lines.push(`- **${item.name}**: ${locText(item.note || "", `res-${idx}-note`)}`);
+    });
+    lines.push("");
+  }
+
+  return lines.join("\n").trim();
+}
+
+function buildStandaloneOverviewHtml(analysis, meta = {}) {
+  const title = meta.videoTitle || currentVideoTitle || "YouTube Digest";
+  const channel = meta.channelName || currentChannelName || "";
+  const videoId = meta.videoId || currentVideoId || "";
+  const watchUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : "";
+  const loc = (text, id) =>
+    escapeHtml(getLocalizedPlainText(text || "", "overview", id));
+
+  const tsAnchor = (ts, sec) => {
+    if (!ts) return "";
+    if (watchUrl && Number.isFinite(Number(sec))) {
+      return `<a class="ts-link" href="${escapeHtml(`${watchUrl}&t=${Number(sec)}s`)}" target="_blank" rel="noreferrer">${escapeHtml(ts)}</a>`;
+    }
+    return `<span class="ts-link">${escapeHtml(ts)}</span>`;
+  };
+
+  const boardHtml = analysis?.visualBoard
+    ? renderVisualBoardMarkup(analysis.visualBoard, loc).replace(
+        /<button class="inline-ts-btn" type="button" data-seek-seconds="(\d+)">([^<]+)<\/button>/g,
+        (_m, sec, ts) => tsAnchor(ts, Number(sec)),
+      )
+    : "";
+
+  const takeawaysHtml = (analysis?.coreTakeaways || []).length
+    ? `<div class="takeaways"><div class="label">Core Insights</div><ul>${analysis.coreTakeaways
+        .map((item, idx) => `<li>${loc(item, `takeaway-${idx}`)}</li>`)
+        .join("")}</ul></div>`
+    : "";
+
+  const briefHtml = (analysis?.briefSections || [])
+    .map(
+      (sec, sIdx) => `
+      <article class="brief-card">
+        <h3>${loc(sec.title, `brief-${sIdx}-title`)}</h3>
+        ${sec.lead ? `<p class="lead">${loc(sec.lead, `brief-${sIdx}-lead`)}</p>` : ""}
+        <ul>
+          ${(sec.points || [])
+            .map(
+              (pt, pIdx) => `
+              <li>
+                <div class="pt-head"><strong>${loc(pt.heading, `brief-${sIdx}-pt-${pIdx}-head`)}</strong>${tsAnchor(pt.timestamp, pt.timestampSeconds)}</div>
+                ${pt.detail ? `<p>${loc(pt.detail, `brief-${sIdx}-pt-${pIdx}-detail`)}</p>` : ""}
+              </li>`,
+            )
+            .join("")}
+        </ul>
+      </article>`,
+    )
+    .join("");
+
+  const quotesHtml = (analysis?.keyQuotes || []).length
+    ? `<section class="section"><h2>Key Quotes</h2>${analysis.keyQuotes
+        .map(
+          (q, idx) => `
+          <blockquote class="quote">
+            <p>${loc(q.quote, `quote-${idx}`)}</p>
+            <footer>${q.speaker ? `<span>${escapeHtml(q.speaker)}</span>` : ""}${tsAnchor(q.timestamp, q.timestampSeconds)}</footer>
+          </blockquote>`,
+        )
+        .join("")}</section>`
+    : "";
+
+  const actionsHtml = (analysis?.actionableItems || []).length
+    ? `<section class="section"><h2>Actionable Takeaways</h2><ul class="extras">${analysis.actionableItems
+        .map(
+          (it, idx) =>
+            `<li><strong>${loc(it.title, `action-${idx}-title`)}</strong>: ${loc(it.detail, `action-${idx}-detail`)}</li>`,
+        )
+        .join("")}</ul></section>`
+    : "";
+
+  const resourcesHtml = (analysis?.mentionedResources || []).length
+    ? `<section class="section"><h2>Mentioned Resources</h2><ul class="extras">${analysis.mentionedResources
+        .map(
+          (it, idx) =>
+            `<li><strong>${escapeHtml(it.name)}</strong>: ${loc(it.note, `res-${idx}-note`)}</li>`,
+        )
+        .join("")}</ul></section>`
+    : "";
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>${escapeHtml(analysis?.headline || title)} - YouTube Digest</title>
+<style>
+  :root { --bg:#f7f3ec; --surface:#fff; --raised:#fbf8f2; --border:#e6ded0; --text:#2e2a24; --muted:#6b6258; --accent:#c8674f; --sage:#7c8b6f; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font:15px/1.65 system-ui,-apple-system,sans-serif; padding:36px 20px 64px; }
+  .page { max-width:980px; margin:0 auto; }
+  header { background:var(--surface); border:1px solid var(--border); border-radius:18px; padding:28px 30px; margin-bottom:22px; }
+  .eyebrow { color:var(--accent); font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; margin-bottom:8px; }
+  h1 { font-size:26px; line-height:1.25; margin-bottom:10px; }
+  .meta { font-size:13px; color:var(--muted); margin-bottom:14px; }
+  .meta a { color:var(--accent); text-decoration:none; }
+  .thesis { font-size:15px; color:var(--muted); }
+  .takeaways { margin-top:18px; padding:16px 18px; border-radius:12px; background:#fbf4ef; border:1px solid #eedad1; }
+  .takeaways .label { font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); margin-bottom:8px; }
+  .takeaways ul { padding-left:18px; }
+  .takeaways li { margin:5px 0; }
+  .visual-board { background:var(--surface); border:1px solid #ddd4c4; border-radius:18px; padding:24px 26px; margin-bottom:26px; box-shadow:0 8px 28px rgba(60,50,35,.06); }
+  .visual-board-header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; padding-bottom:14px; margin-bottom:18px; border-bottom:1px solid var(--border); }
+  .visual-board-title { font-size:18px; font-weight:700; }
+  .visual-board-eyebrow { font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--accent); }
+  .board-block { margin-bottom:22px; }
+  .board-block:last-child { margin-bottom:0; }
+  .board-block-title { font-size:14px; font-weight:700; margin-bottom:11px; padding-left:10px; border-left:3px solid var(--accent); }
+  .board-card-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
+  .board-card { border:1px solid var(--border); border-radius:12px; overflow:hidden; background:#fff; }
+  .board-card-head { padding:10px 14px; font-weight:700; font-size:13.5px; border-bottom:1px solid var(--border); }
+  .tone-terracotta .board-card-head { background:#faece6; color:#8f3f2d; }
+  .tone-sage .board-card-head { background:#eef3ea; color:#4b5d3f; }
+  .tone-sand .board-card-head { background:#f7f0e2; color:#705832; }
+  .tone-slate .board-card-head { background:#edf1f5; color:#3d5166; }
+  .board-card-points { list-style:disc; padding:12px 16px 14px 30px; font-size:13.5px; color:var(--muted); }
+  .board-card-points li { margin:4px 0; }
+  .board-table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:12px; }
+  .board-table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  .board-table th { background:var(--raised); text-align:left; padding:10px 14px; border-bottom:1px solid var(--border); }
+  .board-table td { padding:10px 14px; border-bottom:1px solid var(--border); color:var(--muted); vertical-align:top; }
+  .board-table td:first-child { font-weight:600; color:var(--text); background:#fcfaf6; }
+  .board-flow { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; }
+  .board-flow-step { padding:14px; border:1px solid var(--border); border-radius:12px; background:var(--raised); display:flex; gap:10px; }
+  .board-flow-num { background:var(--accent); color:#fff; font-family:ui-monospace,monospace; font-size:12px; font-weight:700; padding:2px 8px; border-radius:6px; height:fit-content; }
+  .board-flow-title { font-weight:700; font-size:13.5px; }
+  .board-flow-detail { font-size:13px; color:var(--muted); margin-top:4px; }
+  .board-metric-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
+  .board-metric-card { padding:14px 16px; border:1px solid var(--border); border-radius:12px; background:linear-gradient(180deg,#fff,#fbf7f1); }
+  .board-metric-value { font-size:22px; font-weight:700; color:var(--accent); }
+  .board-metric-label { font-weight:700; font-size:13px; margin:4px 0; }
+  .board-metric-context { font-size:12.5px; color:var(--muted); }
+  .board-perspective-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }
+  .board-perspective-card { padding:14px 16px; border:1px solid var(--border); border-top:3px solid var(--sage); border-radius:12px; background:#fff; }
+  .board-perspective-card:first-child { border-top-color:var(--accent); }
+  .board-perspective-speaker { font-size:11px; font-weight:700; text-transform:uppercase; color:var(--muted); }
+  .board-perspective-stance { font-weight:700; margin:4px 0 8px; }
+  .board-perspective-args { padding-left:18px; font-size:13.5px; color:var(--muted); }
+  .section { margin-bottom:26px; }
+  .section h2 { font-size:20px; margin-bottom:14px; }
+  .brief-card { background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--accent); border-radius:14px; padding:20px 22px; margin-bottom:14px; }
+  .brief-card h3 { font-size:17px; margin-bottom:6px; }
+  .brief-card .lead { color:var(--muted); padding-bottom:10px; margin-bottom:12px; border-bottom:1px solid var(--border); }
+  .brief-card ul { list-style:none; display:flex; flex-direction:column; gap:12px; }
+  .pt-head { display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:3px; }
+  .brief-card li p { color:var(--muted); font-size:14px; }
+  .ts-link { font-family:ui-monospace,monospace; font-size:11.5px; font-weight:600; color:var(--accent); background:rgba(200,103,79,.1); padding:2px 8px; border-radius:999px; text-decoration:none; white-space:nowrap; }
+  .quote { background:var(--surface); border-left:4px solid var(--accent); border-radius:12px; padding:16px 20px; margin-bottom:12px; }
+  .quote footer { margin-top:8px; display:flex; justify-content:space-between; font-size:12.5px; color:var(--muted); }
+  .extras { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:18px 22px 18px 36px; color:var(--muted); }
+  .extras li { margin:6px 0; }
+  .extras strong { color:var(--text); }
+</style>
+</head>
+<body>
+<main class="page">
+  <header>
+    <div class="eyebrow">YouTube Digest / Executive Brief</div>
+    <h1>${loc(analysis?.headline || title, "headline")}</h1>
+    <div class="meta">${escapeHtml(channel)}${watchUrl ? ` · <a href="${escapeHtml(watchUrl)}" target="_blank" rel="noreferrer">${escapeHtml(title)}</a>` : ""}</div>
+    ${analysis?.oneLineThesis ? `<p class="thesis">${loc(analysis.oneLineThesis, "thesis")}</p>` : ""}
+    ${takeawaysHtml}
+  </header>
+  ${boardHtml}
+  ${briefHtml ? `<section class="section"><h2>Deep Brief</h2>${briefHtml}</section>` : ""}
+  ${quotesHtml}
+  ${actionsHtml}
+  ${resourcesHtml}
+</main>
+</body>
+</html>`;
+}
+
+function copyOverviewMarkdown() {
+  if (!currentAnalysis) return;
+  const md = buildOverviewMarkdown(currentAnalysis);
+  copyToClipboardWithFeedback(md, "copyOverviewMdBtn");
+}
+
+function exportOverviewHtml() {
+  if (!currentAnalysis) return;
+  const htmlDoc = buildStandaloneOverviewHtml(currentAnalysis);
+  const blob = new Blob([htmlDoc], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${sanitizeFilename(currentVideoTitle)}-digest.html`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 /**
@@ -1332,7 +2364,29 @@ function setupTranscriptSearch() {
   next?.addEventListener("click", () => moveTranscriptSearch(1));
 }
 
+function getDisplayedChaptersText() {
+  if (!Array.isArray(currentChapters) || !currentChapters.length) return "";
+  return currentChapters
+    .map((chapter, index) => {
+      const title = getLocalizedPlainText(
+        chapter.title,
+        "chapters",
+        `chapter-${index}-title`,
+      );
+      const summary = getLocalizedPlainText(
+        chapter.summary || "",
+        "chapters",
+        `chapter-${index}-summary`,
+      );
+      return `[${chapter.timestamp}] ${title}\n${summary}`.trim();
+    })
+    .join("\n\n");
+}
+
 function getDisplayedTranscriptText() {
+  if (currentTranscriptView === "timeline") {
+    return getDisplayedChaptersText();
+  }
   if (currentTranscriptMode === "original") return currentTranscriptText || "";
   return getActiveTranscriptSegments()
     .map((segment) => {
@@ -1350,11 +2404,12 @@ function copyTranscript() {
 }
 
 function exportTranscript() {
+  const isTimeline = currentTranscriptView === "timeline";
   const transcriptContent = getDisplayedTranscriptText();
   const videoUrl = `https://youtube.com/watch?v=${currentVideoId}`;
 
   let exportText = "";
-  exportText += `TRANSCRIPT\n`;
+  exportText += `${isTimeline ? "TIMELINE CHAPTERS" : "TRANSCRIPT"}\n`;
   exportText += `${"=".repeat(60)}\n\n`;
   exportText += `Title: ${currentVideoTitle || "Unknown"}\n`;
   exportText += `Channel: ${currentChannelName || "Unknown"}\n`;
@@ -1366,11 +2421,11 @@ function exportTranscript() {
     exportText += `\n${"—".repeat(60)}\n\n`;
   }
 
-  exportText += `TRANSCRIPT:\n\n${transcriptContent}\n`;
+  exportText += `${isTimeline ? "CHAPTERS" : "TRANSCRIPT"}:\n\n${transcriptContent}\n`;
   exportText += `\n${"—".repeat(60)}\n`;
   exportText += `Exported by YouTube Digest\n`;
 
-  const filename = `${sanitizeFilename(currentVideoTitle)}-transcript.txt`;
+  const filename = `${sanitizeFilename(currentVideoTitle)}-${isTimeline ? "timeline" : "transcript"}.txt`;
   downloadTextFile(exportText, filename);
 }
 
@@ -1434,6 +2489,67 @@ function showConfigError(configStatus) {
 // TAB SWITCHING
 // ============================================================
 
+function applyTranscriptViewUi(viewMode) {
+  const normalized = viewMode === "timeline" ? "timeline" : "subtitles";
+  currentTranscriptView = normalized;
+
+  document.querySelectorAll(".transcript-view-btn").forEach((button) => {
+    const active = button.dataset.transcriptView === normalized;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+
+  const subtitlesView = document.getElementById("transcriptSubtitlesView");
+  const timelineView = document.getElementById("transcriptTimelineView");
+  const regenChaptersBtn = document.getElementById("regenerateChaptersBtn");
+  if (subtitlesView) {
+    subtitlesView.hidden = normalized !== "subtitles";
+    subtitlesView.classList.toggle("active", normalized === "subtitles");
+  }
+  if (timelineView) {
+    timelineView.hidden = normalized !== "timeline";
+    timelineView.classList.toggle("active", normalized === "timeline");
+  }
+  if (regenChaptersBtn) {
+    regenChaptersBtn.hidden = normalized !== "timeline";
+  }
+}
+
+function switchTranscriptView(viewMode) {
+  const normalized = viewMode === "timeline" ? "timeline" : "subtitles";
+  if (normalized === currentTranscriptView) return;
+
+  if (currentTranscriptView === "subtitles") {
+    captureCurrentTranscriptScrollTop();
+    dismissSelectionActions(true);
+    stopPlaybackTracking();
+  }
+
+  applyTranscriptViewUi(normalized);
+
+  if (normalized === "timeline") {
+    if (!currentChapters && !isChaptersLoading) {
+      void triggerChaptersAnalysis();
+    } else if (currentChapters) {
+      renderChaptersList(currentChapters, {
+        reasoning: currentChaptersReasoning,
+        usage: currentChaptersUsage,
+      });
+    }
+  } else {
+    requestAnimationFrame(() => {
+      const contentArea = document.getElementById("contentArea");
+      if (!contentArea || !transcriptTabIsActive()) return;
+      lastAutoScrollTime = Date.now();
+      contentArea.scrollTop = lastTranscriptScrollTop;
+    });
+    startPlaybackTracking();
+    if (currentTranscriptMode !== "original" && !transcriptScrollObserver) {
+      void translateTranscript();
+    }
+  }
+}
+
 function switchTab(tabName) {
   // Capture the transcript position before another tab reuses the same scroll
   // area. Scrolling Overview or Notes must not replace this value.
@@ -1452,15 +2568,19 @@ function switchTab(tabName) {
 
   // Start/stop playback tracking based on which tab is active
   if (tabName === "transcript") {
-    // Notes always opens at the top, so restore the independent transcript
-    // reading position when the user returns here.
-    requestAnimationFrame(() => {
-      const contentArea = document.getElementById("contentArea");
-      if (!contentArea || !transcriptTabIsActive()) return;
-      lastAutoScrollTime = Date.now();
-      contentArea.scrollTop = lastTranscriptScrollTop;
-    });
-    startPlaybackTracking();
+    if (currentTranscriptView === "subtitles") {
+      // Notes always opens at the top, so restore the independent transcript
+      // reading position when the user returns here.
+      requestAnimationFrame(() => {
+        const contentArea = document.getElementById("contentArea");
+        if (!contentArea || !transcriptTabIsActive()) return;
+        lastAutoScrollTime = Date.now();
+        contentArea.scrollTop = lastTranscriptScrollTop;
+      });
+      startPlaybackTracking();
+    } else {
+      stopPlaybackTracking();
+    }
   } else {
     stopPlaybackTracking();
   }
@@ -1490,39 +2610,57 @@ function switchTab(tabName) {
     currentTranscriptMode !== "original"
   ) {
     void translateNotesContent();
-  } else if (
-    tabName === "transcript" &&
-    currentTranscriptMode !== "original" &&
-    !transcriptScrollObserver
-  ) {
-    void translateTranscript();
+  } else if (tabName === "transcript") {
+    if (currentTranscriptView === "timeline") {
+      if (!currentChapters && !isChaptersLoading) {
+        void triggerChaptersAnalysis();
+      } else if (currentChapters && currentTranscriptMode !== "original") {
+        void translateChaptersContent();
+      }
+    } else if (
+      currentTranscriptMode !== "original" &&
+      !transcriptScrollObserver
+    ) {
+      void translateTranscript();
+    }
   }
 }
 
 /**
- * Triggers the LLM analysis (lazy-loaded when user clicks Overview or Quotes tab).
- * This saves tokens by not running analysis until needed.
+ * Triggers Timeline Chapters generation (lazy-loaded when switching Transcript to Timeline).
  */
-async function triggerAnalysis() {
-  if (!currentTranscriptTimestamped || isAnalysisLoading || currentAnalysis)
-    return;
+async function triggerChaptersAnalysis({ force = false } = {}) {
+  if (!currentTranscriptTimestamped || isChaptersLoading) return;
+  if (currentChapters && !force) return;
 
-  isAnalysisLoading = true;
+  isChaptersLoading = true;
+  if (force) {
+    currentChapters = null;
+    currentChaptersReasoning = "";
+    currentChaptersUsage = null;
+  }
 
-  // Show loading indicators in the Overview tab
+  const requestId = `chapters_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  activeChaptersRequestId = requestId;
+  renderChaptersThinkingSection({
+    visible: true,
+    open: true,
+    status: "Thinking...",
+    meta: "",
+    text: "",
+  });
+
   const chapterList = document.getElementById("chapterList");
-  const quotesList = document.getElementById("quotesList");
-
-  if (chapterList)
+  if (chapterList) {
     chapterList.innerHTML =
-      '<li class="chapter-item" style="color: var(--text-muted); border: none;">Loading chapters...</li>';
-  if (quotesList)
-    quotesList.innerHTML =
-      '<div class="quote-item" style="color: var(--text-muted); border-left-color: var(--border);">Loading quotes...</div>';
+      '<li class="chapter-item chapter-placeholder">Generating proportional timeline chapters...</li>';
+  }
 
   try {
-    const analysisResult = await chrome.runtime.sendMessage({
-      action: "analyzeTranscript",
+    const result = await chrome.runtime.sendMessage({
+      action: "analyzeChapters",
+      requestId,
+      videoId: currentVideoId,
       transcriptText: currentTranscriptTimestamped,
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
@@ -1530,9 +2668,115 @@ async function triggerAnalysis() {
       videoDuration: currentVideoDuration,
     });
 
+    if (activeChaptersRequestId === requestId) {
+      activeChaptersRequestId = null;
+    }
+
+    if (!result?.success) {
+      const outputEl = document.getElementById("chaptersThinkingOutput");
+      if (outputEl?.textContent) {
+        const statusEl = document.getElementById("chaptersThinkingStatus");
+        if (statusEl) statusEl.textContent = "Thinking interrupted";
+      } else {
+        renderChaptersThinkingSection({ visible: false });
+      }
+      if (chapterList) {
+        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Timeline failed: ${escapeHtml(result?.message || result?.error || "Unknown error")}</li>`;
+      }
+      isChaptersLoading = false;
+      return;
+    }
+
+    currentChapters = result.chapters || [];
+    currentChaptersReasoning = result.reasoning || "";
+    currentChaptersUsage = result.usage || null;
+    renderChaptersList(currentChapters, {
+      reasoning: currentChaptersReasoning,
+      usage: currentChaptersUsage,
+    });
+    if (result.keyMoments?.length) {
+      highlightMomentsOnPage(result.keyMoments);
+    }
+    await saveToCache(currentVideoId);
+  } catch (error) {
+    if (activeChaptersRequestId === requestId) {
+      activeChaptersRequestId = null;
+    }
+    renderChaptersThinkingSection({ visible: false });
+    console.error("[YouTube Digest Panel] Chapters error:", error);
+    if (chapterList) {
+      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Error: ${escapeHtml(error.message)}</li>`;
+    }
+  }
+
+  isChaptersLoading = false;
+}
+
+/**
+ * Triggers the Executive Digest LLM analysis (lazy-loaded when user clicks Overview tab).
+ */
+async function triggerAnalysis({ force = false } = {}) {
+  if (!currentTranscriptTimestamped || isAnalysisLoading) return;
+  if (currentAnalysis && !force) return;
+
+  isAnalysisLoading = true;
+  if (force) {
+    currentAnalysis = null;
+  }
+
+  const requestId = `analysis_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  activeAnalysisRequestId = requestId;
+  renderThinkingSection({
+    visible: true,
+    open: true,
+    status: "Thinking...",
+    meta: "",
+    text: "",
+  });
+
+  const digestContainer = document.getElementById("overviewDigestContainer");
+  const quotesList = document.getElementById("quotesList");
+  const exportBtn = document.getElementById("exportOverviewHtmlBtn");
+  const copyMdBtn = document.getElementById("copyOverviewMdBtn");
+  if (exportBtn) exportBtn.disabled = true;
+  if (copyMdBtn) copyMdBtn.disabled = true;
+
+  if (digestContainer) {
+    digestContainer.innerHTML =
+      '<div class="digest-placeholder">Synthesizing visual board and deep executive digest...</div>';
+  }
+  if (quotesList) {
+    quotesList.innerHTML =
+      '<div class="quote-item" style="color: var(--text-muted); border-left-color: var(--border);">Extracting key quotes...</div>';
+  }
+
+  try {
+    const analysisResult = await chrome.runtime.sendMessage({
+      action: "analyzeTranscript",
+      requestId,
+      videoId: currentVideoId,
+      transcriptText: currentTranscriptTimestamped,
+      videoTitle: currentVideoTitle,
+      channelName: currentChannelName,
+      videoDescription: currentVideoDescription,
+      videoDuration: currentVideoDuration,
+    });
+
+    if (activeAnalysisRequestId === requestId) {
+      activeAnalysisRequestId = null;
+    }
+
     if (!analysisResult.success) {
-      if (chapterList)
-        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Analysis failed: ${escapeHtml(analysisResult.error || "Unknown error")}</li>`;
+      const outputEl = document.getElementById("thinkingOutput");
+      if (outputEl?.textContent) {
+        const statusEl = document.getElementById("thinkingStatus");
+        if (statusEl) statusEl.textContent = "Thinking interrupted";
+      } else {
+        renderThinkingSection({ visible: false });
+      }
+      if (digestContainer) {
+        digestContainer.innerHTML = `<div class="digest-placeholder" style="color: var(--accent);">Analysis failed: ${escapeHtml(analysisResult.message || analysisResult.error || "Unknown error")}</div>`;
+      }
       isAnalysisLoading = false;
       return;
     }
@@ -1544,9 +2788,20 @@ async function triggerAnalysis() {
     // Save to cache now that we have analysis
     await saveToCache(currentVideoId);
   } catch (error) {
+    if (activeAnalysisRequestId === requestId) {
+      activeAnalysisRequestId = null;
+    }
+    const outputEl = document.getElementById("thinkingOutput");
+    if (outputEl?.textContent) {
+      const statusEl = document.getElementById("thinkingStatus");
+      if (statusEl) statusEl.textContent = "Thinking interrupted";
+    } else {
+      renderThinkingSection({ visible: false });
+    }
     console.error("[YouTube Digest Panel] Analysis error:", error);
-    if (chapterList)
-      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Error: ${escapeHtml(error.message)}</li>`;
+    if (digestContainer) {
+      digestContainer.innerHTML = `<div class="digest-placeholder" style="color: var(--accent);">Error: ${escapeHtml(error.message)}</div>`;
+    }
   }
 
   isAnalysisLoading = false;
@@ -1967,6 +3222,9 @@ async function saveToCache(videoId) {
 
     const cacheData = {
       analysis: currentAnalysis, // May be null if not yet analyzed
+      chapters: currentChapters,
+      chaptersReasoning: currentChaptersReasoning,
+      chaptersUsage: currentChaptersUsage,
       transcript: currentTranscript,
       transcriptText: currentTranscriptText,
       transcriptTimestamped: currentTranscriptTimestamped,
@@ -2475,6 +3733,7 @@ function resultTabIsActive(tabName) {
  * Copies the shared scroll area's current value into transcript-only state.
  */
 function captureCurrentTranscriptScrollTop() {
+  if (currentTranscriptView !== "subtitles") return;
   const contentArea = document.getElementById("contentArea");
   if (contentArea) lastTranscriptScrollTop = contentArea.scrollTop;
 }
@@ -2582,11 +3841,23 @@ async function handleDisplayLanguageModeChange(mode) {
 
   if (mode === "original") {
     renderTranscript();
+    if (currentChapters) {
+      renderChaptersList(currentChapters, {
+        reasoning: currentChaptersReasoning,
+        usage: currentChaptersUsage,
+      });
+    }
     if (currentAnalysis) renderAnalysisResults(currentAnalysis);
     if (currentNotes.length) renderNotes(currentNotes, currentNotesFilterVideoId);
     return;
   }
 
+  if (currentChapters) {
+    renderChaptersList(currentChapters, {
+      reasoning: currentChaptersReasoning,
+      usage: currentChaptersUsage,
+    });
+  }
   if (currentAnalysis) {
     renderAnalysisResults(currentAnalysis);
   }
@@ -2598,7 +3869,11 @@ async function handleDisplayLanguageModeChange(mode) {
   } else if (activeTabName === "notes" && currentNotes.length) {
     await translateNotesContent();
   } else if (activeTabName === "transcript") {
-    await translateTranscript();
+    if (currentTranscriptView === "timeline" && currentChapters) {
+      await translateChaptersContent();
+    } else {
+      await translateTranscript();
+    }
   }
 }
 
@@ -2904,4 +4179,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   getNavigationUrl,
   renderSubtitleInlineMarkup,
   renderTranscriptSegmentContent,
+  renderVisualBoardMarkup,
+  buildOverviewMarkdown,
+  buildStandaloneOverviewHtml,
 };

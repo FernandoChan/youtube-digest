@@ -15,6 +15,12 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## New in v1.3.0
+
+- Added direct **Google Gemini API** support in Settings (compatible with Google AI Studio keys and Google AI Ultra monthly promotional credits), alongside TokenRouter.
+- Moved **Timeline Chapters** into the **Transcript** tab with a dual-mode switcher (**Subtitles** and **Timeline**), featuring proportional depth and automatic filtering of intros, sponsor reads, and thank-you outros.
+- Rebuilt **Overview** into an **Executive Digest** with an adaptive **Visual Synthesis Board** (thematic cards, comparison tables, process flows, metric strips, and perspective splits), a logic-organized **Deep Brief** with clickable seek timestamps, key quotes, standalone HTML export, and Markdown copy.
+
 ## New in v1.2.0
 
 - Search transcript words or phrases and move through every match.
@@ -61,7 +67,7 @@ Because this is an unpacked extension, it does not update automatically. After d
 YouTube Digest needs two keys under your own provider accounts:
 
 1. A **Supadata API key** to retrieve YouTube transcripts.
-2. A **DeepSeek API key** for overviews, explanations, translation, and automatic note polishing.
+2. A **TokenRouter API key** for overviews, explanations, translation, and automatic note polishing.
 
 ### Get a Supadata API key
 
@@ -73,27 +79,35 @@ YouTube Digest needs two keys under your own provider accounts:
 
 See the [official Supadata documentation](https://docs.supadata.ai/) if the dashboard flow changes.
 
-### Get a DeepSeek API key
+### Get a TokenRouter or Google Gemini API key
 
-1. Open the official [DeepSeek API Keys page](https://platform.deepseek.com/api_keys).
-2. Sign in or create a DeepSeek Platform account when prompted.
-3. Choose **Create new API key**, give it a recognizable name such as `YouTube Digest`, and create it.
-4. Copy the key immediately. The full key may only be shown once.
-5. Paste it into **DeepSeek API key** in YouTube Digest Settings.
-6. If DeepSeek reports insufficient balance, add credit in your DeepSeek Platform account and try again.
+**Option A: Google Gemini API (supports Google AI Ultra credits)**
 
-See the [official DeepSeek API documentation](https://api-docs.deepseek.com/) for current account and API details.
+1. Open [Google AI Studio](https://aistudio.google.com/apikey) with the primary Google Account tied to your Google AI Ultra subscription.
+2. Claim your monthly promotional API credits and confirm billing is linked to your project.
+3. Create an API key (`AIza...`).
+4. In YouTube Digest Settings, switch **Provider** to **Google Gemini (AI Studio / Ultra credits)**, choose your model (default `gemini-4-neon`), and paste your key.
+
+**Option B: TokenRouter**
+
+1. Open the [TokenRouter dashboard](https://tokenrouter.cheap/dashboard).
+2. Sign in and create a dedicated API key (optionally set a spending limit).
+3. Copy the key and paste it into **TokenRouter API key** in YouTube Digest Settings.
+4. Select your preferred model in Settings (default is `deepseek-v4.1-flash`).
 
 Open **Settings** from the side panel. You can also open the YouTube Digest **Options** page from its card at `chrome://extensions` or by right-clicking its toolbar icon. Paste keys only into these Settings fields. Never paste a key into an AI chat, repository file, screenshot, or public message.
 
-The published version supports DeepSeek V4 Flash as its only AI provider:
+This local TokenRouter build supports TokenRouter and direct Google Gemini API with a provider and model selector:
 
 ```text
-Base URL: https://api.deepseek.com
-Model: deepseek-v4-flash
-```
+TokenRouter Base URL: https://tokenrouter.cheap/v1
+TokenRouter Default Model: deepseek-v4.1-flash
+TokenRouter Models: deepseek-v4.1-flash, gemini-3.5-flash, gpt-5.5, claude-sonnet-5-5, gemini-4-argon
 
-YouTube Digest sends every DeepSeek request in non-thinking mode for responsive, predictable interactions. The endpoint and model are fixed in Settings, so the only AI credential you enter is your DeepSeek API key. To use another provider or model, copy the safe customization prompt in Settings and give it to a coding agent for your local copy. Never add an API key to that prompt or chat.
+Google Gemini Base URL: https://generativelanguage.googleapis.com/v1beta
+Google Gemini Default Model: gemini-4-neon
+Google Gemini Models: gemini-4-neon, gemini-4-carbon, gemini-4-argon, gemini-4-hydrogen, gemini-3.8-flash, gemini-3.5-flash
+```
 
 Keys and settings are stored in Chrome's local extension storage on your device. Release builds do not include or use `config.js`.
 

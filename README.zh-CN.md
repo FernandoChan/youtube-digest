@@ -17,6 +17,12 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ![YouTube Digest 双语演示](YouTube%20Digest%20demo%20bilingual.png)
 
+## v1.3.0 更新
+
+- 新增 **Google Gemini API** 直连支持，可直接在设置页填入 Google AI Studio 密钥（支持 Google AI Ultra 订阅每月赠送的 API 额度），并与 TokenRouter 共存切换。
+- 将 **时间线章节（Timeline）** 整合进 **Transcript** 标签页，提供 **Subtitles（具体字幕）** 与 **Timeline（时间线总结）** 双模式切换，章节详略得当并自动过滤片头寒暄、口播广告与片尾致谢。
+- 将 **Overview** 升级为 **AI 深度总结纪要（Executive Digest）**：顶部提供自适应 **视觉画板（Visual Board）**（主题卡片网格、对比矩阵表、方法论流程图、关键数据条、多方观点碰撞），下方提供按逻辑重组的深度纪要（含可点击跳转的时间戳）、高光金句、行动启发与提及资源，并支持一键导出独立 HTML 画板与复制 Markdown。
+
 ## v1.2.0 更新
 
 - 搜索字幕中的单词或短语，并依次查看所有匹配位置。
@@ -63,7 +69,7 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 YouTube Digest 需要你在自己的服务账号中准备两个 Key：
 
 1. **Supadata API Key**，用于获取 YouTube 字幕。
-2. **DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。
+2. **TokenRouter API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。
 
 ### 获取 Supadata API Key
 
@@ -75,27 +81,35 @@ YouTube Digest 需要你在自己的服务账号中准备两个 Key：
 
 如果页面流程发生变化，请查看 [Supadata 官方文档](https://docs.supadata.ai/)。
 
-### 获取 DeepSeek API Key
+### 获取 TokenRouter 或 Google Gemini API Key
 
-1. 打开 DeepSeek 官方 [API Keys 页面](https://platform.deepseek.com/api_keys)。
-2. 按照提示登录，或创建 DeepSeek 开放平台账号。
-3. 点击 **Create new API key**，填写容易识别的名称，例如 `YouTube Digest`，然后创建 Key。
-4. 立即复制 Key。完整 Key 可能只会显示一次。
-5. 把 Key 粘贴到 YouTube Digest 设置中的 **DeepSeek API key**。
-6. 如果 DeepSeek 提示余额不足，请在 DeepSeek 开放平台账号中充值后再试。
+**方式一：Google Gemini API（支持 Google AI Ultra 订阅赠送额度）**
 
-当前账号和接口说明请查看 [DeepSeek 官方 API 文档](https://api-docs.deepseek.com/)。
+1. 使用开通 Google AI Ultra 的主账号登录 [Google AI Studio](https://aistudio.google.com/apikey)。
+2. 领取每月赠送的 API 额度，并确认项目已绑定结算账户。
+3. 创建并复制 Gemini API Key（`AIza...`）。
+4. 打开 YouTube Digest 设置，将服务商切换为 **Google Gemini (AI Studio / Ultra credits)**，选择模型（默认 `gemini-4-neon`）并粘贴密钥保存。
+
+**方式二：TokenRouter**
+
+1. 打开 [TokenRouter 控制台](https://tokenrouter.cheap/dashboard)。
+2. 登录后创建一把专用 API Key（建议顺手设置消费上限）。
+3. 复制 Key，并粘贴到 YouTube Digest 设置中的 **TokenRouter API 密钥**。
+4. 在设置页下拉框中选择模型（默认 `deepseek-v4.1-flash`）。
 
 在侧边栏中打开 **Settings**。你也可以在 `chrome://extensions` 的 YouTube Digest 卡片中打开扩展选项。Key 只能粘贴到这些设置输入框中。不要把 Key 发送到 AI 对话、项目文件、截图或公开消息中。
 
-发布版本只支持 DeepSeek V4 Flash：
+当前本地版本通过 TokenRouter 或 Google Gemini API 接入多模型：
 
 ```text
-Base URL: https://api.deepseek.com
-Model: deepseek-v4-flash
-```
+TokenRouter Base URL: https://tokenrouter.cheap/v1
+TokenRouter 默认模型: deepseek-v4.1-flash
+TokenRouter 可选模型: deepseek-v4.1-flash, gemini-3.5-flash, gpt-5.5, claude-sonnet-5-5, gemini-4-argon
 
-YouTube Digest 会让所有 DeepSeek 请求使用非思考模式，以获得更快、更稳定的交互。设置中的接口地址和模型固定，只需要填写 DeepSeek API Key。如果想使用其他服务或模型，请在设置中复制安全的自定义 prompt，让编程 Agent 修改你自己的本地副本。不要把任何 API Key 放进 prompt 或对话。
+Google Gemini Base URL: https://generativelanguage.googleapis.com/v1beta
+Google Gemini 默认模型: gemini-4-neon
+Google Gemini 可选模型: gemini-4-neon, gemini-4-carbon, gemini-4-argon, gemini-4-hydrogen, gemini-3.8-flash, gemini-3.5-flash
+```
 
 API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布包不会包含或使用 `config.js`。
 

@@ -32,7 +32,6 @@ segment has a stable `id` and source-language `text`.
 
 ```
 You are a professional translator. Translate the transcript segments into {langName}.
-The video is titled "{videoTitle}". Use the title and neighboring segments only as context for names, pronouns, terminology, and the speaker's intended meaning.
 
 {baseRules}
 
@@ -41,6 +40,8 @@ The video is titled "{videoTitle}". Use the title and neighboring segments only 
 - Return a JSON object with exactly this shape: {"segments":[{"id":"unchanged-id","text":"translated text"}]}.
 - Copy every input id exactly. Translate only text values.
 - Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
+
+Context: The video is titled "{videoTitle}". Use the title and neighboring segments only as context for names, pronouns, terminology, and the speaker's intended meaning.
 ```
 
 ## Interface content translation
@@ -50,7 +51,6 @@ note. Each segment has a stable `id` and source-language `text`.
 
 ```
 You are a professional translator. Translate the interface content into {langName}.
-The related video is titled "{videoTitle}". Use the title and neighboring segments only as context for names, pronouns, terminology, and intended meaning.
 
 {baseRules}
 
@@ -60,6 +60,8 @@ The related video is titled "{videoTitle}". Use the title and neighboring segmen
 - Return a JSON object with exactly this shape: {"segments":[{"id":"unchanged-id","text":"translated text"}]}.
 - Copy every input id exactly. Translate only text values.
 - Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
+
+Context: The related video is titled "{videoTitle}". Use the title and neighboring segments only as context for names, pronouns, terminology, and intended meaning.
 ```
 
 ## Variables

@@ -38,8 +38,8 @@
         <h1 data-i18n="heading">Bring your own API keys</h1>
         <p class="lede" data-i18n="lede">
           Keys stay in this Chrome profile and are sent only to Supadata and
-          DeepSeek. This open-source extension has no developer server or
-          analytics.
+          your chosen AI provider (Google Gemini or TokenRouter). This
+          open-source extension has no developer server or analytics.
         </p>
       </header>
 
@@ -75,19 +75,77 @@
 
         <section class="card">
           <h2 data-i18n="aiProvider">AI provider</h2>
+
+          <label for="aiProviderSelect" data-i18n="aiProviderSelectLabel"
+            >Provider</label
+          >
+          <select id="aiProviderSelect" name="aiProvider">
+            <option value="tokenrouter" selected>TokenRouter</option>
+            <option value="google">
+              Google Gemini (AI Studio / Ultra credits)
+            </option>
+          </select>
+
           <div
             class="provider-summary"
-            aria-label="Supported AI provider"
+            id="providerSummary"
+            aria-label="Active AI provider"
             data-i18n-aria-label="providerSummaryLabel"
           >
-            <span class="provider-name">DeepSeek V4 Flash</span>
-            <span class="provider-badge" data-i18n="providerBadge"
+            <span class="provider-name" id="providerSummaryName"
+              >TokenRouter</span
+            >
+            <span
+              class="provider-badge"
+              id="providerSummaryBadge"
+              data-i18n="providerBadge"
               >Supported in this version</span
             >
           </div>
 
-          <label for="aiApiKey" data-i18n="deepseekApiKeyLabel"
-            >DeepSeek API key</label
+          <label for="aiModel" data-i18n="aiModelLabel">Model</label>
+          <select id="aiModel" name="aiModel">
+            <option value="deepseek-v4.1-flash" selected>
+              DeepSeek V4.1 Flash (deepseek-v4.1-flash)
+            </option>
+            <option value="gemini-3.5-flash">
+              Gemini 3.5 Flash (gemini-3.5-flash)
+            </option>
+            <option value="gpt-5.5">GPT-5.5 (gpt-5.5)</option>
+            <option value="claude-sonnet-5-5">
+              Claude Sonnet 5.5 (claude-sonnet-5-5)
+            </option>
+            <option value="gemini-4-argon">
+              Gemini 4 Argon (gemini-4-argon)
+            </option>
+          </select>
+          <p class="help" id="aiModelHelp" data-i18n="aiModelHelp">
+            Default is DeepSeek V4.1 Flash (fast and low cost). You can switch
+            models at any time.
+          </p>
+
+          <label for="reasoningEffort" data-i18n="reasoningEffortLabel"
+            >Thinking mode</label
+          >
+          <select id="reasoningEffort" name="reasoningEffort">
+            <option value="low" selected>
+              Low (Recommended - fast thinking)
+            </option>
+            <option value="medium">Medium (Balanced thinking)</option>
+            <option value="high">High (Deepest, slower)</option>
+            <option value="off">Off (Fastest, no thinking)</option>
+          </select>
+          <p class="help" data-i18n="reasoningEffortHelp">
+            Controls reasoning depth for thinking models such as Gemini 4 and
+            DeepSeek V4.1 Flash. Overview streams the thinking process live, and
+            prompt prefix caching is automatic.
+          </p>
+
+          <label
+            for="aiApiKey"
+            id="aiApiKeyLabel"
+            data-i18n="deepseekApiKeyLabel"
+            >TokenRouter API key</label
           >
           <input
             id="aiApiKey"
@@ -95,24 +153,25 @@
             type="password"
             autocomplete="off"
             spellcheck="false"
-            placeholder="Paste your DeepSeek key"
+            placeholder="Paste your TokenRouter key"
           />
           <p class="help">
-            <span data-i18n="deepseekHelp"
-              >YouTube Digest uses DeepSeek V4 Flash for overviews,
-              explanations, translation, and note polishing.</span
+            <span id="aiKeyHelpPrefix" data-i18n="deepseekHelp"
+              >YouTube Digest uses TokenRouter for overviews, explanations,
+              translation, and note polishing.</span
             >
             <a
-              href="https://platform.deepseek.com/api_keys"
+              id="aiKeyHelpLink"
+              href="https://tokenrouter.cheap/dashboard"
               target="_blank"
               rel="noreferrer"
               data-i18n="deepseekLink"
-              >Create a DeepSeek API key</a
-            ><span data-i18n="deepseekHelpSuffix">.</span>
+              >Open TokenRouter dashboard</a
+            ><span id="aiKeyHelpSuffix" data-i18n="deepseekHelpSuffix">.</span>
           </p>
-          <div class="privacy-note" data-i18n="privacyNote">
-            When you use AI features, DeepSeek receives the video transcript
-            and relevant video context. Review DeepSeek's terms and pricing
+          <div class="privacy-note" id="aiPrivacyNote" data-i18n="privacyNote">
+            When you use AI features, TokenRouter receives the video transcript
+            and relevant video context. Review TokenRouter's terms and pricing
             before saving.
           </div>
         </section>

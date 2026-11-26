@@ -72,10 +72,10 @@ function loadSidepanelHelpers({
 
 function loadBackgroundHelpers({
   settings = {
-    provider: "deepseek",
+    provider: "tokenrouter",
     aiApiKey: "test-key",
-    aiBaseUrl: "https://api.deepseek.com",
-    aiModel: "deepseek-v4-flash",
+    aiBaseUrl: "https://tokenrouter.cheap/v1",
+    aiModel: "deepseek-v4.1-flash",
   },
   fetchImpl = fetch,
   setTimeoutImpl = () => 0,
@@ -480,7 +480,8 @@ test("background rejects unsupported language fallthrough and malformed batches"
   );
 });
 
-test("all AI product requests use DeepSeek non-thinking and JSON behavior", async () => {
+test("all AI product requests isolate DeepSeek-only fields and send JSON behavior", async () => {
+  const tokenRouterRequests = [];
   const deepSeekRequests = [];
   const successfulFetch = (requests) => async (_url, options) => {
     requests.push(JSON.parse(options.body));
@@ -492,7 +493,29 @@ test("all AI product requests use DeepSeek non-thinking and JSON behavior", asyn
     };
   };
 
+  const tokenRouter = loadBackgroundHelpers({
+    fetchImpl: successfulFetch(tokenRouterRequests),
+  });
+  const tokenRouterResult = await tokenRouter.requestAiCompletion({
+    maxTokens: 128,
+    responseFormat: { type: "json_object" },
+    messages: [{ role: "user", content: "Hello." }],
+  });
+  assert.equal(tokenRouterResult.text, "translated");
+  assert.equal(tokenRouterRequests[0].model, "deepseek-v4.1-flash");
+  assert.equal(tokenRouterRequests[0].reasoning_effort, "low");
+  assert.equal(Object.hasOwn(tokenRouterRequests[0], "thinking"), false);
+  assert.deepEqual(tokenRouterRequests[0].response_format, {
+    type: "json_object",
+  });
+
   const deepSeek = loadBackgroundHelpers({
+    settings: {
+      provider: "deepseek",
+      aiApiKey: "test-key",
+      aiBaseUrl: "https://api.deepseek.com",
+      aiModel: "deepseek-v4-flash",
+    },
     fetchImpl: successfulFetch(deepSeekRequests),
   });
   const deepSeekResult = await deepSeek.requestAiCompletion({
@@ -502,6 +525,7 @@ test("all AI product requests use DeepSeek non-thinking and JSON behavior", asyn
   });
   assert.equal(deepSeekResult.text, "translated");
   assert.deepEqual(deepSeekRequests[0].thinking, { type: "disabled" });
+  assert.equal(Object.hasOwn(deepSeekRequests[0], "reasoning_effort"), false);
   assert.deepEqual(deepSeekRequests[0].response_format, {
     type: "json_object",
   });
@@ -509,11 +533,12 @@ test("all AI product requests use DeepSeek non-thinking and JSON behavior", asyn
   const backgroundSource = read("background.js");
   assert.equal(
     (backgroundSource.match(/await requestAiCompletion\(\{/g) || []).length,
-    4,
+    5,
   );
   assert.doesNotMatch(backgroundSource, /disableThinking/);
   for (const callPath of [
     "handleAnalyzeTranscript",
+    "handleAnalyzeChapters",
     "cleanupNoteText",
     "handleExplainSelection",
     "callAiTranslation",
@@ -646,9 +671,15 @@ test("provider response reader rejects bodies over 2 MiB", async () => {
   assert.match(result.error, /2 MiB limit/);
 });
 
-test("DeepSeek retries one empty transcript JSON response without response_format", async () => {
+test("DeepSeek retries one empty transcript JSON response without response_format while TokenRouter does not", async () => {
   const requests = [];
   const helpers = loadBackgroundHelpers({
+    settings: {
+      provider: "deepseek",
+      aiApiKey: "test-key",
+      aiBaseUrl: "https://api.deepseek.com",
+      aiModel: "deepseek-v4-flash",
+    },
     fetchImpl: async (url, options) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -678,7 +709,32 @@ test("DeepSeek retries one empty transcript JSON response without response_forma
   assert.equal(requests.length, 2);
   assert.deepEqual(requests[0].response_format, { type: "json_object" });
   assert.equal(Object.hasOwn(requests[1], "response_format"), false);
-  assert.equal(requests[0].max_tokens, 1536);
+  assert.equal(requests[0].max_tokens, 4096);
+
+  const tokenRouterRequests = [];
+  const tokenRouterHelpers = loadBackgroundHelpers({
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      tokenRouterRequests.push(JSON.parse(options.body));
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "" } }],
+        }),
+      };
+    },
+  });
+  const trResult = await tokenRouterHelpers.handleTranslateContent(
+    { segments: [{ id: "segment-0-0", text: "English source sentence." }] },
+    "transcriptBatch",
+    "zh",
+    "Video",
+  );
+  assert.equal(trResult.success, false);
+  assert.equal(trResult.code, "EMPTY_AI_RESPONSE");
+  assert.equal(tokenRouterRequests.length, 1);
 });
 
 test("interface batches use the dedicated Overview and Notes translation prompt", async () => {
@@ -780,4 +836,67 @@ test("Chinese prompt preserves natural bilingual-learning style rules", () => {
   assert.match(prompt, /Use 你, never 您/);
   assert.match(prompt, /spaces between Chinese and adjacent English words or digits/);
   assert.match(prompt, /source-language `text`/);
+});
+
+test("streaming completion emits live reasoning chunks and parses cache usage stats", async () => {
+  const requests = [];
+  const reasoningChunks = [];
+  const contentChunks = [];
+  const sseChunks = [
+    encode('data: {"choices":[{"delta":{"reasoning_content":"First, "}}]}\n\n'),
+    encode('data: {"choices":[{"delta":{"reasoning_content":"check timeline."}}]}\n\n'),
+    encode('data: {"choices":[{"delta":{"content":"{\\"chapters\\":"}}]}\n\n'),
+    encode('data: {"choices":[{"delta":{"content":"[]}"}}],"usage":{"prompt_tokens":1200,"completion_tokens":350,"prompt_tokens_details":{"cached_tokens":960},"completion_tokens_details":{"reasoning_tokens":210}}}\n\n'),
+    encode("data: [DONE]\n\n"),
+  ];
+  const helpers = loadBackgroundHelpers({
+    settings: {
+      provider: "tokenrouter",
+      aiApiKey: "test-key",
+      aiBaseUrl: "https://tokenrouter.cheap/v1",
+      aiModel: "deepseek-v4.1-flash",
+      reasoningEffort: "medium",
+    },
+    fetchImpl: async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return streamingResponse(sseChunks);
+    },
+  });
+
+  const result = await helpers.requestAiCompletion({
+    maxTokens: 16384,
+    stream: true,
+    responseFormat: { type: "json_object" },
+    onReasoningChunk: (chunk) => reasoningChunks.push(chunk),
+    onContentChunk: (chunk) => contentChunks.push(chunk),
+    messages: [{ role: "user", content: "Analyze." }],
+  });
+
+  assert.equal(requests[0].stream, true);
+  assert.equal(requests[0].reasoning_effort, "medium");
+  assert.deepEqual(requests[0].stream_options, { include_usage: true });
+  assert.deepEqual(reasoningChunks, ["First, ", "check timeline."]);
+  assert.deepEqual(contentChunks, ['{"chapters":', "[]}"]);
+  assert.equal(result.reasoning, "First, check timeline.");
+  assert.equal(result.text, '{"chapters":[]}');
+  assert.deepEqual({ ...result.usage }, {
+    promptTokens: 1200,
+    cachedTokens: 960,
+    completionTokens: 350,
+    reasoningTokens: 210,
+    model: "deepseek-v4.1-flash",
+  });
+});
+
+test("analysis system prompt stays static across videos for prefix caching", () => {
+  const analysisMd = read("prompts/analysis.md");
+  const systemSection = analysisMd.match(/## System prompt[\s\S]*?```([\s\S]*?)```/)[1];
+  for (const placeholder of [
+    "{durationFormatted}",
+    "{lateThreshold}",
+    "{maxTimestampSeconds}",
+    "{videoTitle}",
+  ]) {
+    assert.equal(systemSection.includes(placeholder), false, placeholder);
+  }
 });

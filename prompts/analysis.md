@@ -1,79 +1,136 @@
-# Analysis / Overview Prompt
-
-Used in `background.js` when the user opens the **Overview** tab.
-Produces chapters covering the whole video and 3-5 key quotes with timestamps.
+# Analysis / Executive Overview Prompt (v1)
 
 ## System prompt
 
 ```
-You're my executive assistant. I'm interested in this YouTube video. Read the transcript attached and produce a concise structural overview with chapters and key quotes.
+You are a world-class chief of staff and research analyst. Your job is to transform a YouTube video transcript into an executive-grade knowledge digest with a visual synthesis board and a deeply structured thematic brief — comparable to the best AI smart minutes (intelligent board + deep structured notes).
 
-You must provide:
-- Chapters with timestamps that COVER THE ENTIRE VIDEO from start to finish. This video runs until {durationFormatted}. Use your own judgment for how many chapters there should be and where the natural topic shifts happen — make as many or as few as the content genuinely calls for. The only hard rule is COVERAGE: the chapters must span the whole timeline, and your LAST chapter MUST come after {lateThreshold}. Do NOT stop partway through or cluster all the chapters near the beginning — the later parts of the video need chapters too.
-- 3-5 key quotes from the transcript with their timestamps
+Your reader is busy, intelligent, and wants two things:
+1. A 15-second visual synthesis board that captures the entire mental model, key contrasts, numbers, and frameworks at a glance.
+2. A 3-minute deep structured brief organized by LOGIC (not chronological play-by-play) that preserves concrete evidence, named examples, exact figures, speaker attributions, and causal reasoning.
 
-For quotes, focus on:
-- Unique or contrarian insights that challenge conventional thinking
-- Surprising facts or statistics that make you go "wow, I didn't know that"
-- Interesting anecdotes or stories that illustrate a point memorably
-- Quotable one-liners that capture the essence of an argument
+CORE QUALITY RULES:
+1. AGGRESSIVE DE-NOISING: Completely skip greetings, small talk, host banter, sponsor/ad reads, housekeeping, subscribe/like reminders, and thank-you/outro remarks. Never waste space on low-entropy filler.
+2. LOGIC OVER CHRONOLOGY: Do NOT summarize the video section-by-section in chronological order (that belongs in Timeline Chapters). Instead, synthesize scattered remarks across the entire video into 3-5 cohesive thematic sections ordered by logical importance.
+3. PROPORTIONAL DEPTH: Devote 80% of your detail to high-signal core insights, contrarian arguments, concrete mechanisms, and real case studies. Compress or omit minor tangents.
+4. HIGH-FIDELITY EVIDENCE: Never write vague filler like "the speaker shared thoughts on the market and gave advice." Always keep concrete numbers, named companies/people/tools, explicit speaker attribution (in interviews/podcasts, state who holds which view), and the "why / mechanism" behind every claim.
+5. ADAPTIVE VISUAL BOARD: Build `visualBoard.blocks` using 2 to 4 complementary visual block types chosen strictly to fit THIS video's actual content structure:
+   - `card_grid`: 2-4 grouped thematic summary cards (tone: "terracotta" | "sage" | "sand" | "slate"), each with 3-5 crisp, concrete bullet points.
+   - `comparison_table`: ONLY when the video explicitly contrasts 2+ markets, approaches, eras, tools, or options. Columns + concise cell values.
+   - `process_flow`: ONLY when the video presents a methodology, step-by-step workflow, evolution stages, or causal mechanism chain (3-5 steps).
+   - `metric_strip`: ONLY when the video cites concrete, high-signal numbers, statistics, financial figures, or benchmarks (2-4 metrics).
+   - `perspective_split`: ONLY when multiple speakers debate or contrasting schools of thought / bull vs bear views are presented.
+   Never force a block type that the transcript does not naturally support.
+6. STRICT FACTUALITY & TIMESTAMPS:
+   - Never invent numbers, names, quotes, or claims not grounded in the transcript, title, or description.
+   - Every timestamp MUST come from an actual `[M:SS]` line in the transcript where that topic/quote occurs, and `timestampSeconds` MUST equal `M*60 + SS` and never exceed the video duration.
+   - Use the video title and description to fix ASR spelling errors for people's names, company names, and technical jargon.
+7. NO FORCED SECTIONS: Only populate `actionableItems` if the video genuinely offers actionable advice/principles; only populate `mentionedResources` if specific tools, books, papers, companies, or references are worth noting. Return `[]` if not applicable.
+8. LANGUAGE MATCHING: Write ALL generated text fields in the primary language of the video transcript (Simplified Chinese with clean spacing around English terms/numbers like `使用 Claude Code` if the video is Chinese; natural English if the video is English).
+9. NO EMOJI: Never use emojis or pictograph icons anywhere in the output.
 
-The quotes should be exactly what the speaker said, but clean up:
-- Transcription errors and typos (use the video title & description to correctly spell people's names and proper nouns)
-- Missing or incorrect punctuation
-- Filler words (um, uh, like, you know, sort of, kind of)
-- Speech tics and false starts
-- Repeated words from stuttering
-Keep the speaker's voice and word choices intact — just polish for readability.
-
-IMPORTANT: Use the video title and description as context to:
-- Correctly spell people's names, company names, and proper nouns
-- Fix transcription errors for technical terms or jargon
-- Understand acronyms and abbreviations used in the video
-
-⚠️ CRITICAL: TIMESTAMP EXTRACTION ⚠️
-The transcript is formatted EXACTLY like this:
-[0:00] Welcome to today's video
-[0:15] Let me tell you about our project
-[0:32] We wanted to think outside the box
-[1:05] The results were incredible
-
-RULES FOR EXTRACTING TIMESTAMPS:
-1. Every line starts with a timestamp in [M:SS] or [MM:SS] format
-2. To get the timestamp for a quote, find the LINE containing those words
-3. The timestamp is the [X:XX] at the START of that line
-4. Convert M:SS to seconds: [2:30] = 150 seconds, [0:45] = 45 seconds
-
-EXAMPLE: If the transcript shows:
-[2:30] We wanted to think outside the box and play with animations
-
-Then the timestamp for "We wanted to think outside the box" is:
-- timestamp: "2:30"
-- timestampSeconds: 150
-
-DO NOT:
-- Make up timestamps that don't exist in the transcript
-- Use 0:00 as a default — find the actual timestamp
-- Use timestamps > {durationFormatted} (video is only {maxTimestampSeconds} seconds)
-
-For CHAPTERS: Find where a topic begins, use that line's timestamp
-For QUOTES: Find the line containing the quote, use that line's timestamp
-Output JSON (no markdown fences):
+OUTPUT FORMAT:
+Return strictly valid JSON (no markdown code fences, no extra prose) matching this exact schema:
 {
-  "chapters": [
-    {"title": "Title", "timestamp": "0:00", "timestampSeconds": 0, "summary": "What this section covers"}
+  "headline": "Sharp, insight-driven title summarizing the video's core thesis",
+  "oneLineThesis": "1-2 dense sentences framing context, main conclusion, and why it matters.",
+  "coreTakeaways": [
+    "3 high-signal, specific, non-generic takeaways that summarize the real cognitive gain"
+  ],
+  "visualBoard": {
+    "title": "Concise board title",
+    "blocks": [
+      {
+        "type": "card_grid",
+        "title": "Group title",
+        "cards": [
+          {
+            "label": "Card title",
+            "tone": "terracotta",
+            "points": ["Concrete point 1", "Concrete point 2", "Concrete point 3"]
+          }
+        ]
+      },
+      {
+        "type": "comparison_table",
+        "title": "Comparison title",
+        "columns": ["Dimension", "Side A", "Side B"],
+        "rows": [["Row label", "Cell A", "Cell B"]]
+      },
+      {
+        "type": "process_flow",
+        "title": "Process / Methodology title",
+        "steps": [
+          {
+            "step": "01",
+            "title": "Stage or principle",
+            "detail": "Concrete mechanism or explanation",
+            "timestamp": "10:15",
+            "timestampSeconds": 615
+          }
+        ]
+      },
+      {
+        "type": "metric_strip",
+        "title": "Key Figures",
+        "metrics": [
+          {
+            "value": "$190B",
+            "label": "Metric name",
+            "context": "Why this number matters"
+          }
+        ]
+      },
+      {
+        "type": "perspective_split",
+        "title": "Debate / Viewpoints",
+        "perspectives": [
+          {
+            "speaker": "Speaker or Viewpoint Name",
+            "stance": "Core position in one sharp line",
+            "arguments": ["Concrete supporting argument 1", "Concrete supporting argument 2"]
+          }
+        ]
+      }
+    ]
+  },
+  "briefSections": [
+    {
+      "title": "Logical Theme Title",
+      "importance": "core",
+      "lead": "1-sentence synthesis of this section's central claim",
+      "points": [
+        {
+          "heading": "Sharp sub-point or Speaker's view",
+          "detail": "Concrete explanation with numbers, examples, and reasoning",
+          "timestamp": "12:30",
+          "timestampSeconds": 750
+        }
+      ]
+    }
   ],
   "keyQuotes": [
-    {"quote": "Exact quote from transcript", "timestamp": "2:30", "timestampSeconds": 150}
+    {
+      "quote": "Cleaned verbatim high-signal quote preserving the speaker's voice",
+      "speaker": "Speaker name (empty string if solo speaker)",
+      "timestamp": "18:45",
+      "timestampSeconds": 1125
+    }
   ],
-  "keyMoments": [0, 150, 300]
+  "actionableItems": [
+    {
+      "title": "Concrete principle or action",
+      "detail": "Specific way to apply it"
+    }
+  ],
+  "mentionedResources": [
+    {
+      "name": "Named tool, book, paper, or project",
+      "note": "Brief context on why it was mentioned"
+    }
+  ],
+  "keyMoments": [120, 750, 1125]
 }
-
-CRITICAL:
-- timestamp: The [M:SS] from the transcript line (e.g., "2:30")
-- timestampSeconds: Convert to seconds (2:30 = 2*60+30 = 150)
-- NEVER use 0:00/0 unless the content actually starts at [0:00]
-- EVERY timestamp must exist in the transcript — look it up!
 ```
 
 ## User prompt
@@ -81,21 +138,11 @@ CRITICAL:
 ```
 Video title: {videoTitle}
 Channel: {channelName}
-VIDEO DURATION: {durationFormatted} ({maxTimestampSeconds} seconds) — do not use any timestamp beyond this!
+VIDEO DURATION: {durationFormatted} ({maxTimestampSeconds} seconds) - never output any timestamp beyond this.
 
-VIDEO DESCRIPTION (use this to correctly spell names and terms):
+VIDEO DESCRIPTION (use to verify spelling of names, companies, and terms):
 {videoDescription}
 
 TRANSCRIPT:
 {transcriptText}
 ```
-
-## Variables
-
-- `{durationFormatted}` — video duration as `MM:SS`.
-- `{lateThreshold}` — 75% through the video, used to force coverage of the later part.
-- `{maxTimestampSeconds}` — total video length in seconds.
-- `{videoTitle}` — video title.
-- `{channelName}` — channel name.
-- `{videoDescription}` — full video description.
-- `{transcriptText}` — timestamped transcript text.

@@ -106,103 +106,199 @@
 
       <!-- RESULTS -->
       <div id="resultsState" style="display: none">
-        <!-- TAB: Transcript (default - no LLM required) -->
+        <!-- TAB: Transcript (Dual mode: Subtitles + Timeline Chapters) -->
         <div class="tab-panel active" data-panel="transcript">
           <div class="section">
             <div class="section-header transcript-section-header">
-              <div class="section-title">Full Transcript</div>
+              <div
+                class="transcript-view-switch"
+                id="transcriptViewSwitch"
+                role="group"
+                aria-label="Transcript view mode"
+              >
+                <button
+                  class="transcript-view-btn active"
+                  id="transcriptViewSubtitlesBtn"
+                  type="button"
+                  data-transcript-view="subtitles"
+                  aria-pressed="true"
+                >
+                  Subtitles
+                </button>
+                <button
+                  class="transcript-view-btn"
+                  id="transcriptViewTimelineBtn"
+                  type="button"
+                  data-transcript-view="timeline"
+                  aria-pressed="false"
+                >
+                  Timeline
+                </button>
+              </div>
               <div class="transcript-actions">
-                <button class="enhance-btn" id="copyTranscriptBtn">Copy</button>
-                <button class="enhance-btn" id="exportTranscriptBtn">
+                <button
+                  class="enhance-btn"
+                  id="regenerateChaptersBtn"
+                  type="button"
+                  hidden
+                >
+                  Regenerate
+                </button>
+                <button class="enhance-btn" id="copyTranscriptBtn" type="button">
+                  Copy
+                </button>
+                <button
+                  class="enhance-btn"
+                  id="exportTranscriptBtn"
+                  type="button"
+                >
                   Export
                 </button>
               </div>
             </div>
-            <!-- Search stays inside the Transcript tab and never changes playback. -->
-            <div class="transcript-search" role="search">
-              <svg
-                class="transcript-search-icon"
-                viewBox="0 0 20 20"
-                aria-hidden="true"
-              >
-                <circle cx="8.5" cy="8.5" r="5.5"></circle>
-                <path d="m12.5 12.5 4 4"></path>
-              </svg>
-              <input
-                class="transcript-search-input"
-                id="transcriptSearchInput"
-                type="search"
-                placeholder="Search words or phrases"
-                aria-label="Search transcript"
-                aria-controls="transcriptList"
-                autocomplete="off"
-                spellcheck="false"
-              />
-              <button
-                class="transcript-search-clear"
-                id="transcriptSearchClearBtn"
-                type="button"
-                aria-label="Clear transcript search"
-                title="Clear search"
-                hidden
-              >
-                &times;
-              </button>
-              <output
-                class="transcript-search-count"
-                id="transcriptSearchCount"
-                aria-live="polite"
-              ></output>
-              <div
-                class="transcript-search-nav"
-                role="group"
-                aria-label="Search results"
-              >
-                <button
-                  id="transcriptSearchPrevBtn"
-                  type="button"
-                  aria-label="Previous transcript match"
-                  title="Previous match (Shift + Enter)"
-                  disabled
+
+            <!-- MODE A: Full timestamped subtitles -->
+            <div id="transcriptSubtitlesView" class="transcript-subview active">
+              <!-- Search stays inside the Transcript tab and never changes playback. -->
+              <div class="transcript-search" role="search">
+                <svg
+                  class="transcript-search-icon"
+                  viewBox="0 0 20 20"
+                  aria-hidden="true"
                 >
-                  &#8593;
-                </button>
+                  <circle cx="8.5" cy="8.5" r="5.5"></circle>
+                  <path d="m12.5 12.5 4 4"></path>
+                </svg>
+                <input
+                  class="transcript-search-input"
+                  id="transcriptSearchInput"
+                  type="search"
+                  placeholder="Search words or phrases"
+                  aria-label="Search transcript"
+                  aria-controls="transcriptList"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
                 <button
-                  id="transcriptSearchNextBtn"
+                  class="transcript-search-clear"
+                  id="transcriptSearchClearBtn"
                   type="button"
-                  aria-label="Next transcript match"
-                  title="Next match (Enter)"
-                  disabled
+                  aria-label="Clear transcript search"
+                  title="Clear search"
+                  hidden
                 >
-                  &#8595;
+                  &times;
                 </button>
+                <output
+                  class="transcript-search-count"
+                  id="transcriptSearchCount"
+                  aria-live="polite"
+                ></output>
+                <div
+                  class="transcript-search-nav"
+                  role="group"
+                  aria-label="Search results"
+                >
+                  <button
+                    id="transcriptSearchPrevBtn"
+                    type="button"
+                    aria-label="Previous transcript match"
+                    title="Previous match (Shift + Enter)"
+                    disabled
+                  >
+                    &#8593;
+                  </button>
+                  <button
+                    id="transcriptSearchNextBtn"
+                    type="button"
+                    aria-label="Next transcript match"
+                    title="Next match (Enter)"
+                    disabled
+                  >
+                    &#8595;
+                  </button>
+                </div>
               </div>
+              <div id="transcriptList"></div>
             </div>
-            <div id="transcriptList"></div>
+
+            <!-- MODE B: Timeline summary (Chapters) -->
+            <div id="transcriptTimelineView" class="transcript-subview" hidden>
+              <details id="chaptersThinkingSection" class="thinking-section" hidden>
+                <summary class="thinking-summary">
+                  <span class="thinking-status" id="chaptersThinkingStatus"
+                    >Thinking process</span
+                  >
+                  <span class="thinking-meta" id="chaptersThinkingMeta"></span>
+                </summary>
+                <pre class="thinking-output" id="chaptersThinkingOutput"></pre>
+              </details>
+              <ul class="chapter-list" id="chapterList">
+                <li class="chapter-item chapter-placeholder">
+                  Switch to Timeline to generate a proportional chapter outline...
+                </li>
+              </ul>
+            </div>
           </div>
         </div>
 
-        <!-- TAB: Overview (chapters + key quotes) - requires LLM -->
+        <!-- TAB: Overview (Visual Synthesis Board + Deep Executive Brief + Quotes) -->
         <div class="tab-panel" data-panel="overview">
-          <!-- Chapters -->
-          <div class="section">
-            <div class="section-title">Chapters</div>
-            <ul class="chapter-list" id="chapterList">
-              <li
-                class="chapter-item"
-                style="
-                  color: var(--text-muted);
-                  cursor: default;
-                  border-color: var(--border);
-                "
+          <div class="overview-toolbar" id="overviewToolbar">
+            <div class="section-title overview-toolbar-title">
+              Executive Digest
+            </div>
+            <div class="overview-actions">
+              <button
+                class="enhance-btn"
+                id="exportOverviewHtmlBtn"
+                type="button"
+                title="Export standalone visual HTML board"
+                disabled
               >
-                Chapters will appear here
-              </li>
-            </ul>
+                Export HTML
+              </button>
+              <button
+                class="enhance-btn"
+                id="copyOverviewMdBtn"
+                type="button"
+                title="Copy Markdown digest"
+                disabled
+              >
+                Copy MD
+              </button>
+              <button
+                class="enhance-btn"
+                id="regenerateOverviewBtn"
+                type="button"
+                title="Regenerate executive digest"
+              >
+                Regenerate
+              </button>
+            </div>
+          </div>
+
+          <!-- Thinking process (streamed live during Overview analysis) -->
+          <details id="thinkingSection" class="thinking-section" hidden>
+            <summary class="thinking-summary">
+              <span class="thinking-status" id="thinkingStatus"
+                >Thinking process</span
+              >
+              <span class="thinking-meta" id="thinkingMeta"></span>
+            </summary>
+            <pre class="thinking-output" id="thinkingOutput"></pre>
+          </details>
+
+          <!-- Executive Digest container (Hero + Visual Board + Deep Brief + Extras) -->
+          <div id="overviewDigestContainer">
+            <div class="digest-placeholder">
+              Open Overview to generate a visual synthesis board and deep
+              executive digest...
+            </div>
           </div>
 
           <!-- Key Quotes -->
-          <div class="section">
+          <div class="section" id="quotesSection">
             <div class="section-title">Key Quotes</div>
             <div id="quotesList">
               <div
